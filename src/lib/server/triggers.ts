@@ -246,6 +246,7 @@ import {
 	type InfectionPlayer
 } from './infection';
 import { mapName } from '$lib/format';
+import type { TeamLock } from '$lib/team-lock';
 import { statsIn, usesStats } from '$lib/placeholders';
 import { settings } from './settings';
 import { playerStats, riskPerformanceFor } from './leaderboards';
@@ -680,6 +681,8 @@ export interface TickContext {
 	startedAt: number;
 	/** RestartTimeUtc the process started with ("HH:MM", UTC); null or absent when unset */
 	restartTimeUtc?: string | null;
+	/** the game's lock on overpopulated teams, from the config document; null or absent until read */
+	teamLock?: TeamLock | null;
 	/** the match that ended between the previous look and this one, or null */
 	matchEnd: MatchEnd | null;
 	/** the first look after the server was out of reach: what happened meanwhile is unknown (a match
@@ -1789,15 +1792,24 @@ async function evalInfection(
 			MAX_CHAT
 		);
 	pushInfection(out, row, cfg, mem, players, { moves: look.moves, news: look.news }, say, now);
-	if (look.result && look.result !== row.lastResult) {
-		row.lastResult = look.result;
+	// The game's own lock on a side too far ahead fights the infection, whose side grows with every
+	// kill: while the config document has it on, the row says so beside how the round stands.
+	const lock = ctx.teamLock?.on ? infectionLockNote(ctx.teamLock.threshold) : '';
+	const base = look.result ?? row.lastResult.split(INFECTION_LOCK_MARK)[0];
+	const line = base && lock ? `${base}${INFECTION_LOCK_MARK}${lock}` : base || lock;
+	if (line && line !== row.lastResult) {
+		row.lastResult = line;
 		out.updates.push({
 			id: row.id,
 			...(look.moves.length || look.news.length ? { lastFiredAt: ctx.ts } : {}),
-			lastResult: look.result
+			lastResult: line.slice(0, 300)
 		});
 	}
 }
+
+const INFECTION_LOCK_MARK = ' · ';
+const infectionLockNote = (threshold: number) =>
+	`Warning: the game locks a team ${threshold} ahead (Lock overpopulated teams), so moves onto the infected side can be refused: switch it off on the Config tab`;
 
 /** How an Infection rule's text reads for a player (or none), with the rule's own placeholders. */
 export type InfectionSay = (

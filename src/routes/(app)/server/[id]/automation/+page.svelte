@@ -2215,9 +2215,12 @@
 						infected player who switches back is put back; a survivor who joins the
 						infected stays infected, and anyone who joins more than a minute into a
 						round joins the infected. A new match starts a new round. Needs the kill
-						feed. While a Team balance rule is on, the rule waits. Moves are under
-						Recent actions and in the audit trail; Discord hears only of the ones that
-						fail. One rule per server.
+						feed. While a Team balance rule is on, the rule waits. The game's Lock
+						overpopulated teams (on by default: a side two ahead takes no more players)
+						can refuse the moves onto the growing infected side: switch it off on the
+						Config tab; the rule's row warns while it is on. Moves are under Recent
+						actions and in the audit trail; Discord hears only of the ones that fail.
+						One rule per server.
 					</p>
 				{:else if f.kind === 'restart_skip'}
 					<div class="space-y-1.5 text-[13px]">

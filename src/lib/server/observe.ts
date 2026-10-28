@@ -12,6 +12,7 @@ import { forLog, publicMessage } from './http';
 import type { OrgRow, ServerRow } from './access';
 import { ACTIONS, readConfig } from './actions';
 import { reservedSlotsHeld } from '../reserved-doc';
+import { teamLockFromConfig, type TeamLock } from '../team-lock';
 import { restartTimeFromConfig } from '../uptime';
 import { GameError, WardogsClient } from './rcon';
 import { matches, samples, serverLive } from './db/schema';
@@ -179,6 +180,9 @@ export interface Identity {
 	restartTimeUtc: string | null;
 	/** restartTimeUtc has been read for this process start; a restart clears it */
 	restartTimeRead: boolean;
+	/** the game's lock on overpopulated teams, as the config document last read sets it; absent until
+	 *  read (the Infection rule warns while it is on) */
+	teamLock?: TeamLock | null;
 	features: Features | null;
 	/** when it was last (re)read; 0 asks the next observation to read it */
 	checkedAt: number;
@@ -356,6 +360,7 @@ async function refreshIdentity(client: WardogsClient, m: ServerMemory, now: numb
 		const text = (await readConfig(client)).text;
 		next.reservedSlots = reservedSlotsHeld(text);
 		next.restartTimeUtcFile = restartTimeFromConfig(text);
+		next.teamLock = teamLockFromConfig(text);
 		if (!next.restartTimeRead) {
 			next.restartTimeUtc = next.restartTimeUtcFile;
 			next.restartTimeRead = true;
@@ -724,6 +729,7 @@ export async function observeServer(env: Env, m: ServerMemory, kinds: ObserveKin
 						performance: risk.performance,
 						startedAt: m.startedAt,
 						restartTimeUtc: m.identity.restartTimeUtc,
+						teamLock: m.identity.teamLock ?? null,
 						matchEnd,
 						recovered: wasOffline,
 						// the lines the match stage will write, for the broadcast's {mvp} and {top}
