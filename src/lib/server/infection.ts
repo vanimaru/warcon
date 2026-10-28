@@ -1,7 +1,15 @@
 // The Infection rule (kind `infection`): a game mode built from the kill feed and the move without the
 // kill. Each round starts with a few players on the infected side and everyone else on the survivors'
 // side: one faction of the rule's choosing, or (the default) every faction but the infected's, so on a
-// full server of three factions only the first infected move at the start. A survivor killed by an infected player joins the infected (moved as they lie dead, so they
+// full server of three factions only the first infected move at the start.
+//
+// The game's own win stands: a side scores while it has more players than the others in the control
+// zone, and the first to the cap wins. The rule plays into it rather than against it: the infected
+// start few and cannot hold the zone, so the survivors' sides score first; every kill an infected
+// player makes moves a survivor across, until the infected outnumber them in the zone and their side
+// races to the cap. So the survivors win by reaching the cap before the infection takes the zone, and
+// the infection by reaching it first, or by leaving nobody uninfected. As the match ends the rule
+// says which, in its own words, with who infected the most. A survivor killed by an infected player joins the infected (moved as they lie dead, so they
 // respawn on that side); the round is the infected's once nobody is left, and survivors last as long
 // as they can. A new match starts a new round.
 //
@@ -59,6 +67,10 @@ export interface InfectionConfig {
 	lastSurvivorMessage: string;
 	/** broadcast when nobody is left uninfected */
 	allInfectedMessage: string;
+	/** broadcast as the match ends with a survivors' side ahead (on the game's scores) */
+	survivorsWinMessage: string;
+	/** broadcast as the match ends with the infected ahead, or nobody left uninfected */
+	infectedWinMessage: string;
 	/** end the match once everyone is infected, so the next round starts on the next map */
 	endMatch: boolean;
 }
@@ -105,6 +117,8 @@ export function validateInfection(c: Record<string, unknown>): InfectionConfig {
 		fewLeftMessage: text('fewLeftMessage'),
 		lastSurvivorMessage: text('lastSurvivorMessage'),
 		allInfectedMessage: text('allInfectedMessage'),
+		survivorsWinMessage: text('survivorsWinMessage'),
+		infectedWinMessage: text('infectedWinMessage'),
 		endMatch: c.endMatch === true
 	};
 }
@@ -150,6 +164,10 @@ export interface InfectionMemory {
 	/** the milestones announced this round, and those passed before the round could (a round that
 	 *  starts with 8 survivors announces no 10) */
 	milestonesTold: Set<number>;
+	/** this round's infections by each infected player, for the round's top infector */
+	infectedBy: Map<string, { name: string; count: number }>;
+	/** the sides as the last look with a player list saw them (the list empties as a match ends) */
+	lastCounts: { infected: number; survivors: number };
 }
 
 export const newInfectionMemory = (key: string): InfectionMemory => ({
@@ -162,7 +180,9 @@ export const newInfectionMemory = (key: string): InfectionMemory => ({
 	startedAt: 0,
 	waitingSince: 0,
 	lastSurvivorTold: false,
-	milestonesTold: new Set()
+	milestonesTold: new Set(),
+	infectedBy: new Map(),
+	lastCounts: { infected: 0, survivors: 0 }
 });
 
 export interface InfectionPlayer {
@@ -185,7 +205,17 @@ export type InfectionNews =
 	| { kind: 'start'; patients: InfectionPlayer[] }
 	| { kind: 'few'; survivors: number }
 	| { kind: 'last'; survivor: InfectionPlayer }
-	| { kind: 'all' };
+	| { kind: 'all' }
+	| {
+			kind: 'result';
+			/** true: the infection won; false: the survivors; null: nobody ahead (a tie, no score) */
+			infectedWon: boolean | null;
+			/** the faction ahead on the game's scores, if any */
+			winner: string | null;
+			infected: number;
+			survivors: number;
+			top: { name: string; count: number } | null;
+	  };
 
 export interface InfectionLook {
 	moves: InfectionMove[];
@@ -235,6 +265,8 @@ export function infectionLook(
 		/** the factions of the match being played */
 		factions: string[];
 		matchEnded: boolean;
+		/** the faction ahead as the match ended (the game's result when it sent one) */
+		winner?: string | null;
 		now: number;
 		perLook?: number;
 		rand?: () => number;
@@ -243,6 +275,16 @@ export function infectionLook(
 	const { players, factions, now } = input;
 	const out: InfectionLook = { moves: [], news: [], result: null };
 	if (input.matchEnded) {
+		const result = roundResult(cfg, mem, input.winner ?? null);
+		if (result) {
+			out.news.push(result);
+			out.result =
+				result.infectedWon === null
+					? 'Match over: no side ahead'
+					: result.infectedWon
+						? 'Match over: the infection won'
+						: 'Match over: the survivors won';
+		}
 		mem.phase = 'waiting';
 		mem.roles.clear();
 		mem.askedAt.clear();
@@ -250,17 +292,19 @@ export function infectionLook(
 		mem.waitingSince = 0;
 		mem.lastSurvivorTold = false;
 		mem.milestonesTold.clear();
+		mem.infectedBy.clear();
+		mem.lastCounts = { infected: 0, survivors: 0 };
 	}
 	const missing = [cfg.infectedFaction, cfg.survivorFaction].filter(
 		(f) => f && !factions.some((x) => same(x, f))
 	);
 	if (missing.length) {
-		out.result = `Waiting: this match has no ${missing.join(' or ')} faction`;
+		out.result ??= `Waiting: this match has no ${missing.join(' or ')} faction`;
 		return out;
 	}
 	const sides = survivorSides(cfg, factions);
 	if (!sides.length) {
-		out.result = 'Waiting: this match has no faction for the survivors';
+		out.result ??= 'Waiting: this match has no faction for the survivors';
 		return out;
 	}
 	const picked = players.filter((p) => p.faction);
@@ -268,7 +312,7 @@ export function infectionLook(
 
 	if (mem.phase === 'adopt') {
 		if (!enough || !picked.length) {
-			out.result = `Waiting for ${cfg.minPlayers} players`;
+			out.result ??= `Waiting for ${cfg.minPlayers} players`;
 			return out;
 		}
 		// What the server shows is the round: everyone on the infected side is infected.
@@ -284,7 +328,7 @@ export function infectionLook(
 	if (mem.phase === 'waiting') {
 		if (!enough || picked.length < 2) {
 			mem.waitingSince = 0;
-			out.result = `Waiting for ${cfg.minPlayers} players`;
+			out.result ??= `Waiting for ${cfg.minPlayers} players`;
 			return out;
 		}
 		if (!mem.waitingSince) mem.waitingSince = now;
@@ -304,6 +348,7 @@ export function infectionLook(
 		mem.waitingSince = 0;
 		mem.lastSurvivorTold = false;
 		mem.milestonesTold.clear();
+		mem.infectedBy.clear();
 		passMilestones(cfg, mem, picked.length - patients.length);
 		out.news.push({ kind: 'start', patients });
 		out.result = `Round started: ${patients.map((p) => p.name || p.steamId).join(', ')} infected`;
@@ -362,9 +407,35 @@ export function infectionLook(
 					: 'back'
 		});
 	}
+	if (picked.length) mem.lastCounts = roundCounts(mem, players);
 	out.news.push(...roundNews(cfg, mem, players));
 	if (!out.result && out.news.length) out.result = roundLine(mem, players);
 	return out;
+}
+
+/**
+ * How a round came out as its match ended, in the infection's terms, or null when no round was on.
+ * Nobody left uninfected is the infection's win whatever the scores say (an ended match is led by
+ * whoever scored most, which can be a survivors' side); otherwise the game's leader decides.
+ */
+export function roundResult(
+	cfg: InfectionConfig,
+	mem: InfectionMemory,
+	winner: string | null
+): Extract<InfectionNews, { kind: 'result' }> | null {
+	if (mem.phase !== 'running' && mem.phase !== 'over') return null;
+	const infectedWon =
+		mem.phase === 'over' ? true : winner ? same(winner, cfg.infectedFaction) : null;
+	let top: { name: string; count: number } | null = null;
+	for (const t of mem.infectedBy.values()) if (!top || t.count > top.count) top = t;
+	return {
+		kind: 'result',
+		infectedWon,
+		winner,
+		infected: mem.lastCounts.infected,
+		survivors: mem.phase === 'over' ? 0 : mem.lastCounts.survivors,
+		top
+	};
 }
 
 /**
@@ -391,6 +462,11 @@ export function infectionKills(
 		if (mem.roles.get(k.victim.steamId) !== 'survivor') continue;
 		mem.roles.set(k.victim.steamId, 'infected');
 		mem.askedAt.set(k.victim.steamId, now);
+		const by = mem.infectedBy.get(k.killer.steamId);
+		mem.infectedBy.set(k.killer.steamId, {
+			name: k.killer.name || k.killer.steamId,
+			count: (by?.count ?? 0) + 1
+		});
 		infected.push({ victim: k.victim, killer: k.killer, eventId: k.eventId });
 	}
 	return { infected };
@@ -416,6 +492,7 @@ export function roundNews(
 	const infected = on.filter((p) => mem.roles.get(p.steamId) === 'infected');
 	const survivors = on.filter((p) => mem.roles.get(p.steamId) === 'survivor');
 	if (!infected.length) return [];
+	mem.lastCounts = { infected: infected.length, survivors: survivors.length };
 	if (!survivors.length) {
 		mem.phase = 'over';
 		return [{ kind: 'all' }];

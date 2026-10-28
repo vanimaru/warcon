@@ -565,6 +565,8 @@
 		fewLeftMessage: string;
 		lastSurvivorMessage: string;
 		allInfectedMessage: string;
+		survivorsWinMessage: string;
+		infectedWinMessage: string;
 		endMatch: boolean;
 	}
 	/** An Infection rule's texts, in the order a round goes, with what each is for. */
@@ -574,7 +576,9 @@
 		['infectBroadcast', 'Broadcast at every infection'],
 		['fewLeftMessage', 'As the survivors fall to each count below'],
 		['lastSurvivorMessage', 'When one survivor is left'],
-		['allInfectedMessage', 'When everyone is infected']
+		['allInfectedMessage', 'When everyone is infected'],
+		['survivorsWinMessage', 'As the match ends with a survivors’ side ahead'],
+		['infectedWinMessage', 'As the match ends with the infected ahead']
 	] as const;
 	/** WARDOGS' factions, offered for Team balance; a name the game adds later can still be typed. */
 	const FACTIONS = ['Lonestar', 'Valkyra', 'Manticore'];
@@ -861,6 +865,8 @@
 			fewLeftMessage: s('fewLeftMessage', INFECTION_DEFAULTS.fewLeftMessage),
 			lastSurvivorMessage: s('lastSurvivorMessage', INFECTION_DEFAULTS.lastSurvivorMessage),
 			allInfectedMessage: s('allInfectedMessage', INFECTION_DEFAULTS.allInfectedMessage),
+			survivorsWinMessage: s('survivorsWinMessage', INFECTION_DEFAULTS.survivorsWinMessage),
+			infectedWinMessage: s('infectedWinMessage', INFECTION_DEFAULTS.infectedWinMessage),
 			endMatch: b('endMatch', false)
 		};
 		dry = null;
@@ -1079,6 +1085,8 @@
 					fewLeftMessage: f.fewLeftMessage,
 					lastSurvivorMessage: f.lastSurvivorMessage,
 					allInfectedMessage: f.allInfectedMessage,
+					survivorsWinMessage: f.survivorsWinMessage,
+					infectedWinMessage: f.infectedWinMessage,
 					endMatch: f.endMatch
 				};
 			case 'weather_cycle':
@@ -2192,16 +2200,24 @@
 						])}
 						<p class="text-[12px] text-mist-600">
 							{'{patients}'} names the round's first infected, {'{killer}'} who infected a player,
-							{'{infected}'} and {'{survivors}'} count each side. Empty sends nothing.
+							{'{infected}'} and {'{survivors}'} count each side, {'{winner}'} is the faction ahead
+							as the match ends and {'{top}'} the round's top infector. Empty sends nothing.
 						</p>
 					</fieldset>
 					<p class="note">
-						A survivor killed by an infected player joins the infected: moved at once, without the
-						kill, so they respawn on that side. A player who switches sides themselves is put back
-						(a survivor who joins the infected stays infected), and anyone who joins more than a
-						minute into a round joins the infected. A new match starts a new round. Needs the kill
-						feed. While a Team balance rule is on, the rule waits. Moves are under Recent actions
-						and in the audit trail; Discord hears only of the ones that fail. One rule per server.
+						The game's own scoring stands: the side with the most players in the control
+						zone scores, and the first to the cap wins. The infected start few, so the
+						survivors score first; each survivor they kill crosses over, until the
+						infection holds the zone. The survivors win by reaching the cap first, the
+						infection by reaching it, or by leaving nobody uninfected; as the match ends
+						the rule says which. A survivor killed by an infected player joins the
+						infected: moved at once, without the kill, so they respawn on that side. An
+						infected player who switches back is put back; a survivor who joins the
+						infected stays infected, and anyone who joins more than a minute into a
+						round joins the infected. A new match starts a new round. Needs the kill
+						feed. While a Team balance rule is on, the rule waits. Moves are under
+						Recent actions and in the audit trail; Discord hears only of the ones that
+						fail. One rule per server.
 					</p>
 				{:else if f.kind === 'restart_skip'}
 					<div class="space-y-1.5 text-[13px]">

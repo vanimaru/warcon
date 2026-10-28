@@ -114,9 +114,11 @@ export const MESSAGE_RULES: Readonly<Partial<Record<TriggerKind, MessageRule>>> 
 			'infectBroadcast',
 			'fewLeftMessage',
 			'lastSurvivorMessage',
-			'allInfectedMessage'
+			'allInfectedMessage',
+			'survivorsWinMessage',
+			'infectedWinMessage'
 		],
-		own: ['killer', 'team', 'patients', 'infected', 'survivors'],
+		own: ['killer', 'team', 'patients', 'infected', 'survivors', 'winner', 'top'],
 		player: true,
 		kept: true
 	}

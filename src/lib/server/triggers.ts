@@ -1754,6 +1754,7 @@ async function evalInfection(
 		players,
 		factions: (ctx.status.scores ?? []).map((s) => s.name),
 		matchEnded: !!ctx.matchEnd,
+		winner: ctx.matchEnd?.winner ?? null,
 		now,
 		// a few moves a second, as Team balance sends them
 		perLook: Math.min(
@@ -1912,6 +1913,25 @@ export function pushInfection(
 				'the round',
 				{ stage: 'start', patients },
 				'start'
+			);
+		} else if (n.kind === 'result') {
+			if (n.infectedWon === null) continue;
+			const text = n.infectedWon ? cfg.infectedWinMessage : cfg.survivorsWinMessage;
+			broadcast(
+				text &&
+					say(
+						text,
+						null,
+						own({
+							winner: n.winner ?? cfg.infectedFaction,
+							infected: n.infected,
+							survivors: n.survivors,
+							top: n.top ? `${n.top.name} (${n.top.count})` : 'nobody'
+						})
+					),
+				n.infectedWon ? 'the infection’s win' : 'the survivors’ win',
+				{ stage: 'result', infectedWon: n.infectedWon, winner: n.winner, top: n.top },
+				'result'
 			);
 		} else if (n.kind === 'few') {
 			broadcast(

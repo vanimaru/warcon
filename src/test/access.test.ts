@@ -45,7 +45,9 @@ const SILENT_INFECTION = {
 	infectBroadcast: '',
 	fewLeftMessage: '',
 	lastSurvivorMessage: '',
-	allInfectedMessage: ''
+	allInfectedMessage: '',
+	survivorsWinMessage: '',
+	infectedWinMessage: ''
 };
 
 describe.skipIf(!hasTestDb)('access', () => {

@@ -11,6 +11,7 @@ import {
 	patientCount,
 	roundCounts,
 	roundNews,
+	roundResult,
 	validateInfection,
 	type InfectionConfig,
 	type InfectionPlayer
@@ -53,7 +54,9 @@ describe('Infection settings', () => {
 					infectBroadcast: '',
 					fewLeftMessage: '',
 					lastSurvivorMessage: '',
-					allInfectedMessage: ''
+					allInfectedMessage: '',
+					survivorsWinMessage: '',
+					infectedWinMessage: ''
 				})
 			)
 		).toBe(false);
@@ -280,7 +283,9 @@ describe('a round', () => {
 			rand: first
 		});
 		expect(mem.round).toBeGreaterThan(round);
-		expect(look.news[0]).toEqual({ kind: 'start', patients: [players[0]] });
+		// the last round's result, then the new round
+		expect(look.news[0]).toMatchObject({ kind: 'result', infectedWon: true });
+		expect(look.news[1]).toEqual({ kind: 'start', patients: [players[0]] });
 		expect(look.moves.map((m) => m.to)).toEqual(['Lonestar', 'Lonestar', 'Lonestar']);
 	});
 
@@ -410,5 +415,73 @@ describe('a full server of 100', () => {
 		expect(mem.milestonesTold.has(25)).toBe(true);
 		expect(mem.milestonesTold.has(10)).toBe(false);
 		expect(mem.milestonesTold.has(5)).toBe(false);
+	});
+});
+
+describe('the game’s own win, in the infection’s words', () => {
+	const open = validateInfection({ infectedFaction: 'Manticore', minPlayers: 4 });
+	const players = [p(1, 'Manticore'), p(2, 'Lonestar'), p(3, 'Lonestar'), p(4, 'Valkyra')];
+	const started = () => {
+		const mem = newInfectionMemory('k');
+		infectionLook(open, mem, { players, factions: FACTIONS, matchEnded: false, now: 0 });
+		return mem;
+	};
+
+	test('a survivors’ side ahead as the match ends: the survivors won', () => {
+		const mem = started();
+		// the list empties as the match ends: the counts are the last look's
+		const look = infectionLook(open, mem, {
+			players: [],
+			factions: FACTIONS,
+			matchEnded: true,
+			winner: 'Lonestar',
+			now: 60_000
+		});
+		expect(look.news[0]).toEqual({
+			kind: 'result',
+			infectedWon: false,
+			winner: 'Lonestar',
+			infected: 1,
+			survivors: 3,
+			top: null
+		});
+		expect(look.result).toBe('Match over: the survivors won');
+		expect(mem.phase).toBe('waiting');
+	});
+
+	test('the infected ahead: the infection won, with its top infector', () => {
+		const mem = started();
+		infectionKills(
+			open,
+			mem,
+			[
+				{ eventId: 'a', killer: players[0], victim: players[1], suicide: false },
+				{ eventId: 'b', killer: players[1], victim: players[2], suicide: false },
+				{ eventId: 'c', killer: players[0], victim: players[3], suicide: false }
+			],
+			1
+		);
+		roundNews(open, mem, players);
+		const r = roundResult(open, mem, 'Manticore');
+		expect(r).toMatchObject({ infectedWon: true, top: { name: 'P1', count: 2 } });
+	});
+
+	test('nobody left uninfected is the infection’s win, whoever led on points', () => {
+		const mem = started();
+		infectionKills(
+			open,
+			mem,
+			players
+				.slice(1)
+				.map((v, i) => ({ eventId: `${i}`, killer: players[0], victim: v, suicide: false })),
+			1
+		);
+		expect(roundNews(open, mem, players)).toEqual([{ kind: 'all' }]);
+		expect(roundResult(open, mem, 'Lonestar')).toMatchObject({ infectedWon: true, survivors: 0 });
+	});
+
+	test('a tie or a match nobody scored: no side named; no round, no result', () => {
+		expect(roundResult(open, started(), null)).toMatchObject({ infectedWon: null });
+		expect(roundResult(open, newInfectionMemory('k'), 'Lonestar')).toBeNull();
 	});
 });
