@@ -82,6 +82,7 @@ import {
 import {
 	infectionKills,
 	infectionSettingsKey,
+	syncRoundClock,
 	keepInfections,
 	knownInfection,
 	roundNews,
@@ -831,6 +832,9 @@ async function actOnInfection(
 		const cfg = row.config as InfectionConfig;
 		const mem = knownInfection(row.id, infectionSettingsKey(cfg));
 		if (!mem) continue;
+		// a round taken over after a restart: the game's match clock says when it began
+		const latest = sorted[sorted.length - 1];
+		syncRoundClock(mem, Date.parse(latest.ts), latest.eventTime);
 		const { infected } = infectionKills(
 			cfg,
 			mem,

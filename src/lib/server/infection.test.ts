@@ -12,6 +12,8 @@ import {
 	roundCounts,
 	roundNews,
 	roundResult,
+	syncRoundClock,
+	timeLeft,
 	validateInfection,
 	type InfectionConfig,
 	type InfectionPlayer
@@ -56,7 +58,8 @@ describe('Infection settings', () => {
 					lastSurvivorMessage: '',
 					allInfectedMessage: '',
 					survivorsWinMessage: '',
-					infectedWinMessage: ''
+					infectedWinMessage: '',
+					timeLeftMessage: ''
 				})
 			)
 		).toBe(false);
@@ -440,6 +443,7 @@ describe('the game’s own win, in the infection’s words', () => {
 		expect(look.news[0]).toEqual({
 			kind: 'result',
 			infectedWon: false,
+			timeUp: false,
 			winner: 'Lonestar',
 			infected: 1,
 			survivors: 3,
@@ -483,5 +487,104 @@ describe('the game’s own win, in the infection’s words', () => {
 	test('a tie or a match nobody scored: no side named; no round, no result', () => {
 		expect(roundResult(open, started(), null)).toMatchObject({ infectedWon: null });
 		expect(roundResult(open, newInfectionMemory('k'), 'Lonestar')).toBeNull();
+	});
+});
+
+describe('a time limit', () => {
+	const timed = validateInfection({
+		infectedFaction: 'Manticore',
+		minPlayers: 4,
+		timeLimitMinutes: 20
+	});
+	const players = [p(1, 'Valkyra'), p(2, 'Lonestar'), p(3, 'Lonestar'), p(4, 'Valkyra')];
+	// the clock in epoch ms: the round's start is never 0
+	const T = 1_000_000;
+	const look = (mem: ReturnType<typeof newInfectionMemory>, at: number, matchEnded = false) =>
+		infectionLook(timed, mem, {
+			players,
+			factions: FACTIONS,
+			matchEnded,
+			now: T + at,
+			rand: first
+		});
+	const min = 60_000;
+
+	test('none unless set; warnings at 5 and 1 minutes by default', () => {
+		expect(validateInfection({ infectedFaction: 'Manticore' }).timeLimitMinutes).toBe(0);
+		expect(timed.timeWarnings).toEqual([5, 1]);
+		expect(validateInfection({ ...timed, timeLimitMinutes: 999 }).timeLimitMinutes).toBe(180);
+	});
+
+	test('the time left is announced at each warning once, and at the end the match is ended', () => {
+		const mem = newInfectionMemory('k');
+		look(mem, 0);
+		expect(timeLeft(timed, mem, T + 5 * min)).toBe(15 * min);
+		expect(look(mem, 14 * min).news).toEqual([]);
+		expect(look(mem, 15 * min + 1).news).toEqual([{ kind: 'time', minutes: 5 }]);
+		expect(look(mem, 16 * min).news).toEqual([]);
+		expect(look(mem, 19 * min + 30_000).news).toEqual([{ kind: 'time', minutes: 1 }]);
+		const end = look(mem, 20 * min);
+		expect(end.news).toEqual([{ kind: 'timeup' }]);
+		expect(end.result).toBe('Time is up: the survivors held out');
+		// once: the match is being ended
+		expect(look(mem, 20 * min + 2000).news).toEqual([]);
+	});
+
+	test('the survivors who held out win, whoever led on points', () => {
+		const mem = newInfectionMemory('k');
+		look(mem, 0);
+		look(mem, 20 * min);
+		const r = roundResult(timed, mem, 'Manticore');
+		expect(r).toMatchObject({ infectedWon: false, timeUp: true, winner: null, survivors: 3 });
+		expect(roundResult(timed, mem, 'Lonestar')).toMatchObject({ winner: 'Lonestar' });
+		// no more infections once the time is up
+		const { infected } = infectionKills(
+			timed,
+			mem,
+			[{ eventId: 'x', killer: players[0], victim: players[1], suicide: false }],
+			T + 20 * min + 1
+		);
+		expect(infected).toEqual([]);
+		// and the next match starts a fresh round with a fresh clock
+		const next = look(mem, 30 * min, true);
+		expect(next.news[0]).toMatchObject({ kind: 'result', timeUp: true });
+		expect(mem.timeUp).toBe(false);
+		expect(timeLeft(timed, mem, T + 30 * min)).toBe(20 * min);
+	});
+
+	test('everyone infected before the time: the infection’s win, no time up', () => {
+		const mem = newInfectionMemory('k');
+		look(mem, 0);
+		infectionKills(
+			timed,
+			mem,
+			players
+				.slice(1)
+				.map((v, i) => ({ eventId: `${i}`, killer: players[0], victim: v, suicide: false })),
+			1
+		);
+		look(mem, 2000);
+		expect(mem.phase).toBe('over');
+		expect(look(mem, 25 * min).news).toEqual([]);
+		expect(roundResult(timed, mem, 'Lonestar')).toMatchObject({ infectedWon: true, timeUp: false });
+	});
+
+	test('a round taken over after a restart takes its clock from the kill feed', () => {
+		const mem = newInfectionMemory('k');
+		const taken = [p(1, 'Manticore'), p(2, 'Lonestar'), p(3, 'Lonestar'), p(4, 'Valkyra')];
+		infectionLook(timed, mem, {
+			players: taken,
+			factions: FACTIONS,
+			matchEnded: false,
+			now: 100 * min
+		});
+		expect(mem.clockGuessed).toBe(true);
+		expect(timeLeft(timed, mem, 100 * min)).toBe(20 * min);
+		// a kill 12 minutes into the match
+		syncRoundClock(mem, 100 * min, 12 * 60);
+		expect(timeLeft(timed, mem, 100 * min)).toBe(8 * min);
+		// once: a later kill does not move it
+		syncRoundClock(mem, 101 * min, 2);
+		expect(timeLeft(timed, mem, 100 * min)).toBe(8 * min);
 	});
 });

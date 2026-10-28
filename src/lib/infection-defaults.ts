@@ -8,6 +8,7 @@ export const INFECTION_DEFAULTS = {
 	lastSurvivorMessage: '{name} is the last survivor!',
 	allInfectedMessage: 'Everyone is infected!',
 	survivorsWinMessage:
-		'The survivors held out: {winner} wins with {survivors} still uninfected. Top infector: {top}.',
-	infectedWinMessage: 'The infection wins with {infected} infected. Top infector: {top}.'
+		'The survivors held out with {survivors} still uninfected. Top infector: {top}.',
+	infectedWinMessage: 'The infection wins with {infected} infected. Top infector: {top}.',
+	timeLeftMessage: '{minutes} min left: {survivors} survivors still standing!'
 };

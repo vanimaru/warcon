@@ -9,7 +9,11 @@
 // player makes moves a survivor across, until the infected outnumber them in the zone and their side
 // races to the cap. So the survivors win by reaching the cap before the infection takes the zone, and
 // the infection by reaching it first, or by leaving nobody uninfected. As the match ends the rule
-// says which, in its own words, with who infected the most. A survivor killed by an infected player joins the infected (moved as they lie dead, so they
+// says which, in its own words, with who infected the most.
+//
+// The game has no time limit of its own, so the rule can keep one: survivors who hold out until it
+// runs out win, whatever the scores, and the rule ends the match then (POST /v1/match/end, Match
+// control), with the time left announced on the way. A survivor killed by an infected player joins the infected (moved as they lie dead, so they
 // respawn on that side); the round is the infected's once nobody is left, and survivors last as long
 // as they can. A new match starts a new round.
 //
@@ -39,6 +43,10 @@ export const INFECTION_MAX_PATIENTS = 30;
 /** The survivor counts announced by default as a round goes (a full server starts near 90). */
 export const INFECTION_DEFAULT_MILESTONES = [25, 10, 5];
 const MAX_MILESTONES = 10;
+/** The longest round the rule times, in minutes. */
+export const INFECTION_MAX_LIMIT_MINUTES = 180;
+/** The minutes left announced by default as a timed round runs out. */
+export const INFECTION_DEFAULT_TIME_WARNINGS = [5, 1];
 
 export interface InfectionConfig {
 	/** the faction the infected play on */
@@ -73,6 +81,13 @@ export interface InfectionConfig {
 	infectedWinMessage: string;
 	/** end the match once everyone is infected, so the next round starts on the next map */
 	endMatch: boolean;
+	/** the round's time limit in minutes (0: none): survivors left when it runs out win, and the
+	 *  match is ended */
+	timeLimitMinutes: number;
+	/** minutes left announced as the limit nears (timeLeftMessage) */
+	timeWarnings: number[];
+	/** broadcast as the time left falls to each warning; `{minutes}` says how many */
+	timeLeftMessage: string;
 }
 
 const FACTION = /^[A-Za-z0-9 _.'-]{1,40}$/;
@@ -102,6 +117,20 @@ export function validateInfection(c: Record<string, unknown>): InfectionConfig {
 	if (milestones.length > MAX_MILESTONES)
 		throw new ApiError(400, `At most ${MAX_MILESTONES} survivor counts to announce.`);
 	milestones.sort((a, b) => b - a);
+	const timeLimitMinutes = int(c.timeLimitMinutes, 0, 0, INFECTION_MAX_LIMIT_MINUTES);
+	const timeWarnings: number[] = [];
+	const rawWarnings = Array.isArray(c.timeWarnings)
+		? c.timeWarnings
+		: c.timeWarnings === undefined
+			? INFECTION_DEFAULT_TIME_WARNINGS
+			: [];
+	for (const v of rawWarnings) {
+		const n = int(v, 0, 0, INFECTION_MAX_LIMIT_MINUTES);
+		if (n >= 1 && !timeWarnings.includes(n)) timeWarnings.push(n);
+	}
+	if (timeWarnings.length > MAX_MILESTONES)
+		throw new ApiError(400, `At most ${MAX_MILESTONES} times left to announce.`);
+	timeWarnings.sort((a, b) => b - a);
 	const text = (k: keyof typeof INFECTION_DEFAULTS) =>
 		c[k] === undefined ? INFECTION_DEFAULTS[k] : str(c[k], 256);
 	return {
@@ -119,7 +148,10 @@ export function validateInfection(c: Record<string, unknown>): InfectionConfig {
 		allInfectedMessage: text('allInfectedMessage'),
 		survivorsWinMessage: text('survivorsWinMessage'),
 		infectedWinMessage: text('infectedWinMessage'),
-		endMatch: c.endMatch === true
+		endMatch: c.endMatch === true,
+		timeLimitMinutes,
+		timeWarnings,
+		timeLeftMessage: text('timeLeftMessage')
 	};
 }
 
@@ -168,6 +200,14 @@ export interface InfectionMemory {
 	infectedBy: Map<string, { name: string; count: number }>;
 	/** the sides as the last look with a player list saw them (the list empties as a match ends) */
 	lastCounts: { infected: number; survivors: number };
+	/** when the round's clock started (ms): its start, or for a round taken over after a restart the
+	 *  moment it was taken, until the kill feed's match clock says better (clockGuessed) */
+	clockFrom: number;
+	clockGuessed: boolean;
+	/** the time limit has run out: the match is being ended, and the survivors have won */
+	timeUp: boolean;
+	/** the warnings of time left announced this round, and those passed before they could be */
+	timeWarned: Set<number>;
 }
 
 export const newInfectionMemory = (key: string): InfectionMemory => ({
@@ -182,7 +222,11 @@ export const newInfectionMemory = (key: string): InfectionMemory => ({
 	lastSurvivorTold: false,
 	milestonesTold: new Set(),
 	infectedBy: new Map(),
-	lastCounts: { infected: 0, survivors: 0 }
+	lastCounts: { infected: 0, survivors: 0 },
+	clockFrom: 0,
+	clockGuessed: false,
+	timeUp: false,
+	timeWarned: new Set()
 });
 
 export interface InfectionPlayer {
@@ -206,10 +250,14 @@ export type InfectionNews =
 	| { kind: 'few'; survivors: number }
 	| { kind: 'last'; survivor: InfectionPlayer }
 	| { kind: 'all' }
+	| { kind: 'time'; minutes: number }
+	| { kind: 'timeup' }
 	| {
 			kind: 'result';
 			/** true: the infection won; false: the survivors; null: nobody ahead (a tie, no score) */
 			infectedWon: boolean | null;
+			/** the survivors won by holding out until the time limit */
+			timeUp: boolean;
 			/** the faction ahead on the game's scores, if any */
 			winner: string | null;
 			infected: number;
@@ -294,6 +342,9 @@ export function infectionLook(
 		mem.milestonesTold.clear();
 		mem.infectedBy.clear();
 		mem.lastCounts = { infected: 0, survivors: 0 };
+		mem.timeUp = false;
+		mem.timeWarned.clear();
+		mem.clockFrom = 0;
 	}
 	const missing = [cfg.infectedFaction, cfg.survivorFaction].filter(
 		(f) => f && !factions.some((x) => same(x, f))
@@ -319,6 +370,8 @@ export function infectionLook(
 		for (const p of picked)
 			mem.roles.set(p.steamId, same(p.faction, cfg.infectedFaction) ? 'infected' : 'survivor');
 		mem.startedAt = 0;
+		mem.clockFrom = now;
+		mem.clockGuessed = true;
 		mem.round = nextRound(mem, now);
 		mem.phase = [...mem.roles.values()].includes('infected') ? 'running' : 'waiting';
 		passMilestones(cfg, mem, roundCounts(mem, players).survivors);
@@ -349,6 +402,10 @@ export function infectionLook(
 		mem.lastSurvivorTold = false;
 		mem.milestonesTold.clear();
 		mem.infectedBy.clear();
+		mem.clockFrom = now;
+		mem.clockGuessed = false;
+		mem.timeUp = false;
+		mem.timeWarned.clear();
 		passMilestones(cfg, mem, picked.length - patients.length);
 		out.news.push({ kind: 'start', patients });
 		out.result = `Round started: ${patients.map((p) => p.name || p.steamId).join(', ')} infected`;
@@ -409,6 +466,9 @@ export function infectionLook(
 	}
 	if (picked.length) mem.lastCounts = roundCounts(mem, players);
 	out.news.push(...roundNews(cfg, mem, players));
+	const clock = timeNews(cfg, mem, now);
+	out.news.push(...clock);
+	if (clock.some((n) => n.kind === 'timeup')) out.result = 'Time is up: the survivors held out';
 	if (!out.result && out.news.length) out.result = roundLine(mem, players);
 	return out;
 }
@@ -424,6 +484,21 @@ export function roundResult(
 	winner: string | null
 ): Extract<InfectionNews, { kind: 'result' }> | null {
 	if (mem.phase !== 'running' && mem.phase !== 'over') return null;
+	// held out until the time ran out: the survivors', whoever led on points (a survivors' side is
+	// named as the winner only when it led)
+	if (mem.timeUp && mem.phase === 'running') {
+		let top: { name: string; count: number } | null = null;
+		for (const t of mem.infectedBy.values()) if (!top || t.count > top.count) top = t;
+		return {
+			kind: 'result',
+			infectedWon: false,
+			timeUp: true,
+			winner: winner && !same(winner, cfg.infectedFaction) ? winner : null,
+			infected: mem.lastCounts.infected,
+			survivors: mem.lastCounts.survivors,
+			top
+		};
+	}
 	const infectedWon =
 		mem.phase === 'over' ? true : winner ? same(winner, cfg.infectedFaction) : null;
 	let top: { name: string; count: number } | null = null;
@@ -431,6 +506,7 @@ export function roundResult(
 	return {
 		kind: 'result',
 		infectedWon,
+		timeUp: false,
 		winner,
 		infected: mem.lastCounts.infected,
 		survivors: mem.phase === 'over' ? 0 : mem.lastCounts.survivors,
@@ -455,7 +531,7 @@ export function infectionKills(
 	now: number
 ): { infected: { victim: InfectionPlayer; killer: InfectionPlayer; eventId: string }[] } {
 	const infected: { victim: InfectionPlayer; killer: InfectionPlayer; eventId: string }[] = [];
-	if (mem.phase !== 'running') return { infected };
+	if (mem.phase !== 'running' || mem.timeUp) return { infected };
 	for (const k of kills) {
 		if (!k.killer || k.suicide || k.killer.steamId === k.victim.steamId) continue;
 		if (mem.roles.get(k.killer.steamId) !== 'infected') continue;
@@ -487,7 +563,7 @@ export function roundNews(
 	mem: InfectionMemory,
 	players: InfectionPlayer[]
 ): InfectionNews[] {
-	if (mem.phase !== 'running') return [];
+	if (mem.phase !== 'running' || mem.timeUp) return [];
 	const on = players.filter((p) => mem.roles.has(p.steamId));
 	const infected = on.filter((p) => mem.roles.get(p.steamId) === 'infected');
 	const survivors = on.filter((p) => mem.roles.get(p.steamId) === 'survivor');
@@ -507,6 +583,44 @@ export function roundNews(
 	if (!reached.length) return [];
 	for (const n of reached) mem.milestonesTold.add(n);
 	return [{ kind: 'few', survivors: survivors.length }];
+}
+
+/**
+ * A timed round's clock: the time left announced as it falls to each warning (only the lowest
+ * reached, with the minutes as they are; a warning longer than the limit never), and once it runs
+ * out with survivors on, the end. Mutates `mem`.
+ */
+export function timeNews(cfg: InfectionConfig, mem: InfectionMemory, now: number): InfectionNews[] {
+	if (!cfg.timeLimitMinutes || mem.phase !== 'running' || mem.timeUp || !mem.clockFrom) return [];
+	const left = mem.clockFrom + cfg.timeLimitMinutes * 60_000 - now;
+	if (left <= 0) {
+		mem.timeUp = true;
+		for (const w of cfg.timeWarnings) mem.timeWarned.add(w);
+		return [{ kind: 'timeup' }];
+	}
+	const reached = cfg.timeWarnings.filter(
+		(w) => w < cfg.timeLimitMinutes && left <= w * 60_000 && !mem.timeWarned.has(w)
+	);
+	if (!reached.length) return [];
+	for (const w of reached) mem.timeWarned.add(w);
+	return [{ kind: 'time', minutes: Math.ceil(left / 60_000) }];
+}
+
+/** How long a timed round has left (ms), or null when it is not timed or not running. */
+export const timeLeft = (cfg: InfectionConfig, mem: InfectionMemory, now: number): number | null =>
+	cfg.timeLimitMinutes && mem.phase === 'running' && mem.clockFrom && !mem.timeUp
+		? Math.max(0, mem.clockFrom + cfg.timeLimitMinutes * 60_000 - now)
+		: null;
+
+/**
+ * A round taken over after a restart has its clock from the moment it was taken; the kill feed
+ * stamps each kill with the game's match clock, so the first kill read puts the start where the
+ * match began. Mutates `mem`.
+ */
+export function syncRoundClock(mem: InfectionMemory, receivedAt: number, eventTimeS: number): void {
+	if (!mem.clockGuessed || !Number.isFinite(eventTimeS) || eventTimeS < 0) return;
+	mem.clockFrom = receivedAt - eventTimeS * 1000;
+	mem.clockGuessed = false;
 }
 
 /** How the round stands, for the rule's row and the placeholders. */

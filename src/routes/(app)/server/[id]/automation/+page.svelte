@@ -568,6 +568,10 @@
 		survivorsWinMessage: string;
 		infectedWinMessage: string;
 		endMatch: boolean;
+		/** an Infection rule's time limit (0: none), the minutes left it announces, and the text */
+		timeLimitMinutes: number;
+		timeWarnings: string;
+		timeLeftMessage: string;
 	}
 	/** An Infection rule's texts, in the order a round goes, with what each is for. */
 	const INFECTION_TEXTS = [
@@ -575,6 +579,7 @@
 		['infectWhisper', 'Whisper to the newly infected'],
 		['infectBroadcast', 'Broadcast at every infection'],
 		['fewLeftMessage', 'As the survivors fall to each count below'],
+		['timeLeftMessage', 'As the time left falls to each warning below'],
 		['lastSurvivorMessage', 'When one survivor is left'],
 		['allInfectedMessage', 'When everyone is infected'],
 		['survivorsWinMessage', 'As the match ends with a survivors’ side ahead'],
@@ -867,7 +872,13 @@
 			allInfectedMessage: s('allInfectedMessage', INFECTION_DEFAULTS.allInfectedMessage),
 			survivorsWinMessage: s('survivorsWinMessage', INFECTION_DEFAULTS.survivorsWinMessage),
 			infectedWinMessage: s('infectedWinMessage', INFECTION_DEFAULTS.infectedWinMessage),
-			endMatch: b('endMatch', false)
+			endMatch: b('endMatch', false),
+			// a new rule plays to a 20-minute limit; an older one keeps none until it is given one
+			timeLimitMinutes: n('timeLimitMinutes', t ? 0 : 20),
+			timeWarnings: Array.isArray(c.timeWarnings)
+				? (c.timeWarnings as number[]).join(', ')
+				: '5, 1',
+			timeLeftMessage: s('timeLeftMessage', INFECTION_DEFAULTS.timeLeftMessage)
 		};
 		dry = null;
 		pendingSel =
@@ -1087,7 +1098,13 @@
 					allInfectedMessage: f.allInfectedMessage,
 					survivorsWinMessage: f.survivorsWinMessage,
 					infectedWinMessage: f.infectedWinMessage,
-					endMatch: f.endMatch
+					endMatch: f.endMatch,
+					timeLimitMinutes: Number(f.timeLimitMinutes) || 0,
+					timeWarnings: f.timeWarnings
+						.split(/[\s,]+/)
+						.filter(Boolean)
+						.map(Number),
+					timeLeftMessage: f.timeLeftMessage
 				};
 			case 'weather_cycle':
 				return {
@@ -1335,6 +1352,9 @@
 				return [
 					`${c.infectedFaction} infect ${c.survivorFaction || 'every other faction'}`,
 					`${per ? `1 in ${per} (at least ${n})` : n} infected at the start, with ${c.minPlayers}+ on`,
+					Number(c.timeLimitMinutes) > 0
+						? `${c.timeLimitMinutes} min limit, survivors win when it runs out`
+						: '',
 					c.endMatch ? 'ends the match once all are infected' : ''
 				]
 					.filter(Boolean)
@@ -2161,8 +2181,34 @@
 							><input type="checkbox" bind:checked={f.endMatch} disabled={!canMatch} /> End the match
 							once everyone is infected, so the next round starts on the next map</label
 						>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							Time limit
+							<input
+								class="input w-20 text-right"
+								type="number"
+								min="0"
+								max="180"
+								bind:value={f.timeLimitMinutes}
+								disabled={!canMatch}
+								aria-label="Time limit, minutes (0 for none)"
+							/>
+							min from the round's start (0: none): survivors still standing when it runs out win,
+							and the match is ended. Announce the time left at
+							<input
+								class="input w-28"
+								type="text"
+								data-plain
+								bind:value={f.timeWarnings}
+								disabled={!canMatch}
+								placeholder="5, 1"
+								aria-label="Minutes left to announce"
+							/>
+							min
+						</div>
 						{#if !canMatch}
-							<p class="text-[12px] text-mist-600">Ending the match needs Match control.</p>
+							<p class="text-[12px] text-mist-600">
+								Ending the match, at a time limit or once everyone is infected, needs Match control.
+							</p>
 						{/if}
 						<label class="block space-y-1 text-[13px]"
 							><span class="text-mist-400">Announce the survivors left at</span>
@@ -2201,26 +2247,27 @@
 						<p class="text-[12px] text-mist-600">
 							{'{patients}'} names the round's first infected, {'{killer}'} who infected a player,
 							{'{infected}'} and {'{survivors}'} count each side, {'{winner}'} is the faction ahead
-							as the match ends and {'{top}'} the round's top infector. Empty sends nothing.
+							as the match ends, {'{top}'} the round's top infector and {'{minutes}'} the time left.
+							Empty sends nothing.
 						</p>
 					</fieldset>
 					<p class="note">
 						The game's own scoring stands: the side with the most players in the control
 						zone scores, and the first to the cap wins. The infected start few, so the
 						survivors score first; each survivor they kill crosses over, until the
-						infection holds the zone. The survivors win by reaching the cap first, the
-						infection by reaching it, or by leaving nobody uninfected; as the match ends
-						the rule says which. A survivor killed by an infected player joins the
-						infected: moved at once, without the kill, so they respawn on that side. An
-						infected player who switches back is put back; a survivor who joins the
-						infected stays infected, and anyone who joins more than a minute into a
-						round joins the infected. A new match starts a new round. Needs the kill
-						feed. While a Team balance rule is on, the rule waits. The game's Lock
-						overpopulated teams (on by default: a side two ahead takes no more players)
-						can refuse the moves onto the growing infected side: switch it off on the
-						Config tab; the rule's row warns while it is on. Moves are under Recent
-						actions and in the audit trail; Discord hears only of the ones that fail.
-						One rule per server.
+						infection holds the zone. The survivors win by reaching the cap first, or by
+						holding out until the time limit runs out; the infection by reaching the
+						cap, or by leaving nobody uninfected. As the match ends the rule says which.
+						A survivor killed by an infected player joins the infected: moved at once,
+						without the kill, so they respawn on that side. An infected player who
+						switches back is put back; a survivor who joins the infected stays infected,
+						and anyone who joins more than a minute into a round joins the infected. A
+						new match starts a new round. Needs the kill feed. While a Team balance rule
+						is on, the rule waits. The game's Lock overpopulated teams (on by default: a
+						side two ahead takes no more players) can refuse the moves onto the growing
+						infected side: switch it off on the Config tab; the rule's row warns while
+						it is on. Moves are under Recent actions and in the audit trail; Discord
+						hears only of the ones that fail. One rule per server.
 					</p>
 				{:else if f.kind === 'restart_skip'}
 					<div class="space-y-1.5 text-[13px]">

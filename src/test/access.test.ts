@@ -47,7 +47,8 @@ const SILENT_INFECTION = {
 	lastSurvivorMessage: '',
 	allInfectedMessage: '',
 	survivorsWinMessage: '',
-	infectedWinMessage: ''
+	infectedWinMessage: '',
+	timeLeftMessage: ''
 };
 
 describe.skipIf(!hasTestDb)('access', () => {
@@ -1464,9 +1465,12 @@ describe.skipIf(!hasTestDb)('access', () => {
 			// the texts a new rule starts with are said to the server
 			const speaks = { infectedFaction: 'Manticore', survivorFaction: 'Lonestar' };
 			const ends = { ...SILENT_INFECTION, endMatch: true };
+			// a time limit ends the match when it runs out
+			const timed = { ...SILENT_INFECTION, timeLimitMinutes: 20 };
 			await holds([]);
 			expect((await save(speaks)).status).toBe(403);
 			expect((await save(ends)).status).toBe(403);
+			expect((await save(timed)).status).toBe(403);
 			await holds(['chat.send']);
 			expect((await save(speaks)).status).toBe(201);
 			await holds(['match.control']);

@@ -415,9 +415,11 @@ function ruleAlsoNeeds(kind: TriggerKind, config: unknown): [Capability, string]
 	return null;
 }
 
-/** A third need: an Infection rule that ends the match once everyone is infected. */
+/** A third need: an Infection rule that ends the match once everyone is infected, or at its time
+ *  limit. */
 function ruleEndsMatch(kind: TriggerKind, config: unknown): [Capability, string] | null {
-	if (kind === 'infection' && (config as Partial<InfectionConfig> | null)?.endMatch === true)
+	const c = config as Partial<InfectionConfig> | null;
+	if (kind === 'infection' && (c?.endMatch === true || Number(c?.timeLimitMinutes) > 0))
 		return ['match.control', 'ends the match'];
 	return null;
 }
@@ -1935,16 +1937,40 @@ export function pushInfection(
 						text,
 						null,
 						own({
-							winner: n.winner ?? cfg.infectedFaction,
+							winner: n.winner ?? (n.infectedWon ? cfg.infectedFaction : 'the survivors'),
 							infected: n.infected,
 							survivors: n.survivors,
 							top: n.top ? `${n.top.name} (${n.top.count})` : 'nobody'
 						})
 					),
 				n.infectedWon ? 'the infection’s win' : 'the survivors’ win',
-				{ stage: 'result', infectedWon: n.infectedWon, winner: n.winner, top: n.top },
+				{
+					stage: 'result',
+					infectedWon: n.infectedWon,
+					timeUp: n.timeUp,
+					winner: n.winner,
+					top: n.top
+				},
 				'result'
 			);
+		} else if (n.kind === 'time') {
+			broadcast(
+				cfg.timeLeftMessage && say(cfg.timeLeftMessage, null, own({ minutes: n.minutes })),
+				`${n.minutes} min left`,
+				{ stage: 'time', minutes: n.minutes },
+				`time:${n.minutes}`
+			);
+		} else if (n.kind === 'timeup') {
+			out.intents.push({
+				trigger: row,
+				action: 'endMatch',
+				params: { rule: config },
+				target: 'match',
+				okMessage: 'Ended the match: time is up, the survivors held out.',
+				detail: { stage: 'timeup', round },
+				steamId: null,
+				dedupeKey: key(row, round, 'timeup')
+			});
 		} else if (n.kind === 'few') {
 			broadcast(
 				cfg.fewLeftMessage && say(cfg.fewLeftMessage, null, own()),
