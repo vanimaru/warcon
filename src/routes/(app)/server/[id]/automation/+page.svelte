@@ -5,6 +5,7 @@
 	import { MAX_CHAT } from '$lib/chat';
 	import { fmtAgo, fmtSpan, fmtTime, lightingLabel, mapLabel } from '$lib/format';
 	import { can } from '$lib/capabilities';
+	import { INFECTION_DEFAULTS } from '$lib/infection-defaults';
 	import {
 		causeKind,
 		causeLabel,
@@ -219,6 +220,12 @@
 				return canMatch
 					? ''
 					: 'Saving needs the Match control capability as well as Automation: the rule changes the weather.';
+			case 'infection':
+				return !data.feed
+					? 'Needs the kill feed, which is off on this server. Turn it on under Config.'
+					: !canMove
+						? 'Saving needs the Move capability as well as Automation: the rule moves players between teams.'
+						: '';
 			case 'rotation_shuffle':
 				return canConfig
 					? ''
@@ -243,6 +250,8 @@
 	 */
 	let canKick = $derived(can(data.server.caps, 'players.kick'));
 	let canChat = $derived(can(data.server.caps, 'chat.send'));
+	/** an Infection rule moves players between teams */
+	let canMove = $derived(can(data.server.caps, 'players.move'));
 	let canKill = $derived(can(data.server.caps, 'players.kill'));
 	let canBanHere = $derived(can(data.server.caps, 'bans.manage'));
 	/** a Rotation shuffle rule rewrites the rotation in the config document */
@@ -328,19 +337,23 @@
 				  kind === 'kill_rate' ||
 				  kind === 'kill_distance' ||
 				  kind === 'name_change' ||
-				  (kind === 'bounty' && !data.feed)
+				  ((kind === 'bounty' || kind === 'infection') && !data.feed)
 				? 'Needs the kill feed'
-				: kind === 'bounty'
-					? 'Needs Chat'
-					: kind === 'risk_kick'
-						? 'Needs a Steam key'
-						: kind === 'seed_reward'
-							? 'Needs Reserved slots'
-							: kind === 'rotation_shuffle' || kind === 'live_name'
-								? 'Needs Config & settings'
-								: kind === 'empty_reset' || kind === 'restart_skip' || kind === 'weather_cycle'
-									? 'Needs Match control'
-									: '';
+				: kind === 'infection'
+					? 'Needs Move'
+					: kind === 'bounty'
+						? 'Needs Chat'
+						: kind === 'risk_kick'
+							? 'Needs a Steam key'
+							: kind === 'seed_reward'
+								? 'Needs Reserved slots'
+								: kind === 'rotation_shuffle' || kind === 'live_name'
+									? 'Needs Config & settings'
+									: kind === 'empty_reset' ||
+										  kind === 'restart_skip' ||
+										  kind === 'weather_cycle'
+										? 'Needs Match control'
+										: '';
 	/** A Bounty rule's texts until they are written: a slot is named, an announcement-only rule asks. */
 	const bountyTexts = (reward: 'slot' | 'none') =>
 		reward === 'slot'
@@ -539,7 +552,25 @@
 		lightOrder: string[];
 		lightOn: string[];
 		random: boolean;
+		/** an Infection rule's sides, first infected, texts and end */
+		infectedFaction: string;
+		survivorFaction: string;
+		startInfected: number;
+		startMessage: string;
+		infectWhisper: string;
+		infectBroadcast: string;
+		lastSurvivorMessage: string;
+		allInfectedMessage: string;
+		endMatch: boolean;
 	}
+	/** An Infection rule's texts, in the order a round goes, with what each is for. */
+	const INFECTION_TEXTS = [
+		['startMessage', 'When a round starts'],
+		['infectWhisper', 'Whisper to the newly infected'],
+		['infectBroadcast', 'Broadcast at every infection'],
+		['lastSurvivorMessage', 'When one survivor is left'],
+		['allInfectedMessage', 'When everyone is infected']
+	] as const;
 	/** WARDOGS' factions, offered for Team balance; a name the game adds later can still be typed. */
 	const FACTIONS = ['Lonestar', 'Valkyra', 'Manticore'];
 	/** The alphabets a Latin policy can let in, by the name the rule stores and the one people use. */
@@ -693,7 +724,10 @@
 				'everyMinutes',
 				kind === 'afk_protection' ? 3 : kind === 'weather_cycle' ? 30 : 15
 			),
-			minPlayers: n('minPlayers', kind === 'bounty' || kind === 'afk_watch' ? 20 : 1),
+			minPlayers: n(
+				'minPlayers',
+				kind === 'bounty' || kind === 'afk_watch' ? 20 : kind === 'infection' ? 6 : 1
+			),
 			maxPlayers: typeof c.maxPlayers === 'number' ? c.maxPlayers : null,
 			afterMinutes: n('afterMinutes', 20),
 			cooldownMinutes: n('cooldownMinutes', 30),
@@ -807,7 +841,16 @@
 				data.catalog.lightings.map((l) => l.id)
 			),
 			lightOn: Array.isArray(c.lightings) ? [...(c.lightings as string[])] : weatherPicks(),
-			random: b('random', false)
+			random: b('random', false),
+			infectedFaction: s('infectedFaction', 'Manticore'),
+			survivorFaction: s('survivorFaction', 'Lonestar'),
+			startInfected: n('startInfected', 1),
+			startMessage: s('startMessage', INFECTION_DEFAULTS.startMessage),
+			infectWhisper: s('infectWhisper', INFECTION_DEFAULTS.infectWhisper),
+			infectBroadcast: s('infectBroadcast', INFECTION_DEFAULTS.infectBroadcast),
+			lastSurvivorMessage: s('lastSurvivorMessage', INFECTION_DEFAULTS.lastSurvivorMessage),
+			allInfectedMessage: s('allInfectedMessage', INFECTION_DEFAULTS.allInfectedMessage),
+			endMatch: b('endMatch', false)
 		};
 		dry = null;
 		pendingSel =
@@ -1008,6 +1051,19 @@
 				return { base: f.liveBase, append: f.liveAppend };
 			case 'restart_skip':
 				return {};
+			case 'infection':
+				return {
+					infectedFaction: f.infectedFaction.trim(),
+					survivorFaction: f.survivorFaction.trim(),
+					startInfected: Number(f.startInfected),
+					minPlayers: Number(f.minPlayers),
+					startMessage: f.startMessage,
+					infectWhisper: f.infectWhisper,
+					infectBroadcast: f.infectBroadcast,
+					lastSurvivorMessage: f.lastSurvivorMessage,
+					allInfectedMessage: f.allInfectedMessage,
+					endMatch: f.endMatch
+				};
 			case 'weather_cycle':
 				return {
 					lightings: f.lightOrder.filter((l) => f.lightOn.includes(l)),
@@ -1244,6 +1300,16 @@
 					exempt ? `${exempt} never moved` : '',
 					names.length ? names.join(', ') : '',
 					c.message ? 'with a whisper' : ''
+				]
+					.filter(Boolean)
+					.join(' · ');
+			}
+			case 'infection': {
+				const n = Number(c.startInfected) || 1;
+				return [
+					`${c.infectedFaction} infect ${c.survivorFaction}`,
+					`${n} infected at the start, with ${c.minPlayers}+ on`,
+					c.endMatch ? 'ends the match once all are infected' : ''
 				]
 					.filter(Boolean)
 					.join(' · ');
@@ -1596,7 +1662,7 @@
 				>
 				name{r.fires === 1 ? '' : 's'}</span
 			>
-		{:else if r.kind === 'afk_watch'}
+		{:else if r.kind === 'afk_watch' || r.kind === 'infection'}
 			<span>Nothing to replay</span>
 		{:else if r.kind === 'weather_cycle'}
 			<span
@@ -1994,6 +2060,109 @@
 						own lighting, and the rule changes that at its next turn. A change in order passes over
 						the lighting already on. Every change is under Recent actions and in the audit trail;
 						Discord hears only of the ones that fail. One rule per server.
+					</p>
+				{:else if f.kind === 'infection'}
+					<fieldset class="space-y-2 text-[13px]">
+						<legend class="field-label">Sides</legend>
+						<div class="flex flex-wrap items-center gap-2">
+							<span class="w-24">Infected</span>
+							<input
+								class="input w-40"
+								type="text"
+								list="infection-factions"
+								bind:value={f.infectedFaction}
+								maxlength="40"
+								aria-label="The infected faction"
+								required
+							/>
+						</div>
+						<div class="flex flex-wrap items-center gap-2">
+							<span class="w-24">Survivors</span>
+							<input
+								class="input w-40"
+								type="text"
+								list="infection-factions"
+								bind:value={f.survivorFaction}
+								maxlength="40"
+								aria-label="The survivors' faction"
+								required
+							/>
+						</div>
+						<datalist id="infection-factions">
+							{#each FACTIONS as x (x)}<option value={x}></option>{/each}
+						</datalist>
+						<p class="text-[12px] text-mist-600">
+							At each round's start, players on any other faction are moved to the survivors.
+						</p>
+					</fieldset>
+					<fieldset class="space-y-2">
+						<legend class="field-label">Each round</legend>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							Starts with
+							<input
+								class="input w-20 text-right"
+								type="number"
+								min="1"
+								max="10"
+								bind:value={f.startInfected}
+								aria-label="Players infected at the start"
+								required
+							/>
+							infected, picked at random, once at least
+							<input
+								class="input w-20 text-right"
+								type="number"
+								min="2"
+								max="1000"
+								bind:value={f.minPlayers}
+								aria-label="At least, players"
+								required
+							/>
+							players are on
+						</div>
+						<label class="flex items-center gap-2 text-[13px]"
+							><input type="checkbox" bind:checked={f.endMatch} disabled={!canMatch} /> End the match
+							once everyone is infected, so the next round starts on the next map</label
+						>
+						{#if !canMatch}
+							<p class="text-[12px] text-mist-600">Ending the match needs Match control.</p>
+						{/if}
+					</fieldset>
+					<fieldset class="space-y-3">
+						<legend class="field-label">Messages (each optional)</legend>
+						{#each INFECTION_TEXTS as [k, title] (k)}
+							<label class="block space-y-1 text-[13px]"
+								><span class="text-mist-400">{title}</span>
+								<input
+									class="input"
+									type="text"
+									bind:value={f[k]}
+									maxlength={MAX_CHAT}
+									placeholder={k === 'infectBroadcast'
+										? '{name} was infected by {killer}. {survivors} survivors left.'
+										: ''}
+								/></label
+							>
+						{/each}
+						{@render placeholders('infection', [
+							f.startMessage,
+							f.infectWhisper,
+							f.infectBroadcast,
+							f.lastSurvivorMessage,
+							f.allInfectedMessage
+						])}
+						<p class="text-[12px] text-mist-600">
+							{'{patients}'} names the round's first infected, {'{killer}'} who infected a player,
+							{'{infected}'} and {'{survivors}'} count each side. Empty sends nothing.
+						</p>
+					</fieldset>
+					<p class="note">
+						A survivor killed by an infected player joins the infected: moved at once, without the
+						kill, so they respawn on that side. A player who switches sides themselves is put back
+						(a survivor who joins the infected stays infected), and anyone who joins more than a
+						minute into a round joins the infected. A new match starts a new round. Needs the kill
+						feed. While a Team balance rule is on, the rule waits. Moves are under Recent actions
+						and in the audit trail; Discord hears only of the ones that fail. One rule per server.
 					</p>
 				{:else if f.kind === 'restart_skip'}
 					<div class="space-y-1.5 text-[13px]">

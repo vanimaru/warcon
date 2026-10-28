@@ -586,7 +586,8 @@ export type TriggerKind =
 	| 'rotation_shuffle'
 	| 'live_name'
 	| 'restart_skip'
-	| 'weather_cycle';
+	| 'weather_cycle'
+	| 'infection';
 
 export interface TriggerView {
 	id: string;

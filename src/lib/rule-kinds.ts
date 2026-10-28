@@ -94,6 +94,13 @@ export const RULE_KINDS: { kind: TriggerKind; group: RuleGroup; label: string; b
 			'Kick or flag players who go too long in a live match without a kill, a death or cash earned, even when a macro keeps the idle kick off them.'
 	},
 	{
+		kind: 'infection',
+		group: 'In play',
+		label: 'Infection',
+		blurb:
+			'A game mode: a few players start infected, and every survivor they kill joins them. The last survivors win.'
+	},
+	{
 		kind: 'seed_reward',
 		group: 'Seeding and rewards',
 		label: 'Seeding reward',
@@ -158,8 +165,8 @@ export const RULE_KINDS: { kind: TriggerKind; group: RuleGroup; label: string; b
  * kill everyone twice a round, two Bounty rules would mark two players at once, two Rotation shuffle
  * rules would each undo the other's order, two Live server name rules would each write their own
  * name over the other's, two Skip map after restart rules would end the match twice, two Weather
- * cycle rules would each change the weather on a clock of their own. The picker opens the one a
- * server has.
+ * cycle rules would each change the weather on a clock of their own, two Infection rules would each
+ * move players to sides of their own. The picker opens the one a server has.
  */
 export const ONE_PER_SERVER: TriggerKind[] = [
 	'seed_reward',
@@ -169,26 +176,35 @@ export const ONE_PER_SERVER: TriggerKind[] = [
 	'rotation_shuffle',
 	'live_name',
 	'restart_skip',
-	'weather_cycle'
+	'weather_cycle',
+	'infection'
 ];
 
 /**
  * Rules whose actions come by the hundred as a matter of course (a Team balance sort at every match
  * start, an AFK protection round every few minutes while a server seeds, a Weather cycle change
- * every few minutes all day): Discord hears only of those that fail (webhook-delivery.ts).
+ * every few minutes all day, an Infection round's moves): Discord hears only of those that fail
+ * (webhook-delivery.ts).
  */
-export const FAILURES_ONLY: TriggerKind[] = ['two_teams', 'afk_protection', 'weather_cycle'];
+export const FAILURES_ONLY: TriggerKind[] = [
+	'two_teams',
+	'afk_protection',
+	'weather_cycle',
+	'infection'
+];
 
 /**
- * Rules that act on the kill feed and nothing else: without batches arriving they never fire, so
- * the Automation tab says so on each of them when the feed is silent.
+ * Rules that act on the kill feed: without batches arriving they never fire (an Infection rule
+ * still starts its rounds, but nobody is ever infected), so the Automation tab says so on each of
+ * them when the feed is silent.
  */
 export const FEED_KINDS: TriggerKind[] = [
 	'name_change',
 	'team_kill',
 	'kill_rate',
 	'kill_distance',
-	'bounty'
+	'bounty',
+	'infection'
 ];
 
 /**

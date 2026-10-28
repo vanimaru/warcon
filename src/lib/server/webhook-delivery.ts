@@ -168,6 +168,7 @@ const ACTION_TITLES: Record<string, string> = {
 	'trigger.rotation_shuffle': 'Trigger · rotation shuffle',
 	'trigger.live_name': 'Trigger · live server name',
 	'trigger.weather_cycle': 'Trigger · weather cycle',
+	'trigger.infection': 'Trigger · infection',
 	'player.note': 'Player note',
 	'player.watch': 'Watchlist',
 	'list.add': 'Org list · added',

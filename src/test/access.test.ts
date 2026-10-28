@@ -36,6 +36,16 @@ import { seedWorld, suspend, type World } from './world';
 const ROUTES = join(import.meta.dir, '..', 'routes');
 /** The kill feed's tag for the defibrillator, a Kill distance rule's usual weapon. */
 const DEFIB = 'Id.Item.Defibrillator.Standard';
+/** An Infection rule that says nothing: it needs only Move. */
+const SILENT_INFECTION = {
+	infectedFaction: 'Manticore',
+	survivorFaction: 'Lonestar',
+	startMessage: '',
+	infectWhisper: '',
+	infectBroadcast: '',
+	lastSurvivorMessage: '',
+	allInfectedMessage: ''
+};
 
 describe.skipIf(!hasTestDb)('access', () => {
 	let env: Env;
@@ -536,6 +546,7 @@ describe.skipIf(!hasTestDb)('access', () => {
 				['kill_distance', { causes: [DEFIB], action: 'ban' }, 'bans.manage'],
 				['kill_distance', { causes: [DEFIB], action: 'ban', banScope: 'org' }, 'lists.ban'],
 				['two_teams', { closedFaction: 'Lonestar' }, 'players.move'],
+				['infection', SILENT_INFECTION, 'players.move'],
 				['afk_protection', {}, 'players.kill'],
 				['afk_watch', {}, 'players.kick'],
 				['afk_watch', { action: 'alert' }, 'players.kick'],
@@ -1415,7 +1426,8 @@ describe.skipIf(!hasTestDb)('access', () => {
 				rotation_shuffle: {},
 				live_name: { base: 'Demo Clan #1' },
 				restart_skip: {},
-				weather_cycle: { lightings: ['DayClear', 'DayLateRain'] }
+				weather_cycle: { lightings: ['DayClear', 'DayLateRain'] },
+				infection: SILENT_INFECTION
 			};
 			const save = (kind: string, name: string, config: Record<string, unknown>) =>
 				api(w, 'owner', 'POST api/servers/[id]/triggers', {
@@ -1431,6 +1443,33 @@ describe.skipIf(!hasTestDb)('access', () => {
 			}
 			for (const name of ['One', 'Two'])
 				expect((await save('welcome', name, { message: 'Hi' })).status).toBe(201);
+		});
+
+		test('an Infection rule that speaks needs Chat, and one that ends the match Match control', async () => {
+			const w = await seedWorld(env);
+			const params = { id: w.server.id };
+			const holds = (caps: string[]) =>
+				env.db
+					.update(orgRoles)
+					.set({ capabilities: ['server.view', 'automation.manage', 'players.move', ...caps] })
+					.where(eq(orgRoles.id, w.roles.viewer));
+			const save = (config: Record<string, unknown>) =>
+				api(w, 'viewer', 'POST api/servers/[id]/triggers', {
+					params,
+					body: { kind: 'infection', config }
+				});
+			// the texts a new rule starts with are said to the server
+			const speaks = { infectedFaction: 'Manticore', survivorFaction: 'Lonestar' };
+			const ends = { ...SILENT_INFECTION, endMatch: true };
+			await holds([]);
+			expect((await save(speaks)).status).toBe(403);
+			expect((await save(ends)).status).toBe(403);
+			await holds(['chat.send']);
+			expect((await save(speaks)).status).toBe(201);
+			await holds(['match.control']);
+			const ended = await save(ends);
+			// past the check: one rule per server, and the server has one now
+			expect(ended.status).toBe(409);
 		});
 
 		test('a Team balance rule that whispers needs Chat as well', async () => {

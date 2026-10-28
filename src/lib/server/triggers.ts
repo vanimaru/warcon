@@ -27,6 +27,8 @@
 //                in a live match (afk-watch.ts)
 //   weather_cycle  change the time of day and weather every few minutes, in the match being played
 //                (weather-cycle.ts)
+//   infection    a game mode: a few players start each round infected, and a survivor they kill
+//                joins them (infection.ts; the infections are acted on in feed-events.ts)
 // The worker evaluates them on every observation and writes the actions they want to the outbox
 // (outbox.ts delivers, and every delivery lands in the audit trail as category "trigger"). A dry
 // run replays the last 24 hours from the samples and sessions tables so a rule can be checked
@@ -229,6 +231,20 @@ import {
 	weatherCycleSettingsKey,
 	type WeatherCycleConfig
 } from './weather-cycle';
+import {
+	INFECTION_MAX_MOVES_PER_LOOK,
+	infectionLook,
+	infectionMemory,
+	infectionSettingsKey,
+	infectionSpeaks,
+	keepInfections,
+	roundCounts,
+	type InfectionConfig,
+	type InfectionMemory,
+	type InfectionMove,
+	type InfectionNews,
+	type InfectionPlayer
+} from './infection';
 import { mapName } from '$lib/format';
 import { statsIn, usesStats } from '$lib/placeholders';
 import { settings } from './settings';
@@ -338,6 +354,7 @@ const RULE_NEEDS: Record<
 	team_kill: ['players.kick', 'kicks players'],
 	kill_rate: ['players.kick', 'flags players'],
 	two_teams: ['players.move', 'moves players between teams'],
+	infection: ['players.move', 'moves players between teams'],
 	afk_protection: ['players.kill', 'kills players'],
 	name_change: ['players.kick', 'flags or kicks players'],
 	rotation_shuffle: ['config.apply', 'rewrites the rotation in the config document'],
@@ -392,6 +409,15 @@ function ruleAlsoNeeds(kind: TriggerKind, config: unknown): [Capability, string]
 	const afk = config as Partial<AfkProtectionConfig> | null;
 	if (kind === 'afk_protection' && (str(afk?.message) || str(afk?.doneMessage)))
 		return ['chat.send', 'messages players'];
+	if (kind === 'infection' && infectionSpeaks(config as Partial<InfectionConfig> | null))
+		return ['chat.send', 'messages players'];
+	return null;
+}
+
+/** A third need: an Infection rule that ends the match once everyone is infected. */
+function ruleEndsMatch(kind: TriggerKind, config: unknown): [Capability, string] | null {
+	if (kind === 'infection' && (config as Partial<InfectionConfig> | null)?.endMatch === true)
+		return ['match.control', 'ends the match'];
 	return null;
 }
 
@@ -401,7 +427,11 @@ export function requireRuleCaps(
 	server: ServerRow,
 	access: ServerAccess
 ): void {
-	for (const need of [ruleNeeds(kind, config), ruleAlsoNeeds(kind, config)]) {
+	for (const need of [
+		ruleNeeds(kind, config),
+		ruleAlsoNeeds(kind, config),
+		ruleEndsMatch(kind, config)
+	]) {
 		if (!need || access.caps.has(need[0])) continue;
 		const [cap, does] = need;
 		throw new ApiError(
@@ -589,7 +619,8 @@ export const SETTINGS_KEYS: Partial<Record<string, (config: unknown) => string>>
 	afk_watch: (c) => afkWatchSettingsKey(c as AfkWatchConfig),
 	name_change: (c) => nameChangeSettingsKey(c as NameChangeConfig),
 	restart_skip: () => RESTART_SKIP_KEY,
-	weather_cycle: (c) => weatherCycleSettingsKey(c as WeatherCycleConfig)
+	weather_cycle: (c) => weatherCycleSettingsKey(c as WeatherCycleConfig),
+	infection: (c) => infectionSettingsKey(c as InfectionConfig)
 };
 
 /**
@@ -849,6 +880,10 @@ export async function evaluateTriggers(
 	const out: Evaluation = { intents: [], updates: [] };
 	// Stats are read only for a message that uses them, once per player whichever rules ask.
 	const read = statsReader(env, ctx.server.id);
+	keepInfections(
+		ctx.server.id,
+		new Set(rows.filter((r) => r.kind === 'infection').map((r) => r.id))
+	);
 	for (const row of rows) {
 		try {
 			switch (row.kind) {
@@ -909,6 +944,9 @@ export async function evaluateTriggers(
 					break;
 				case 'weather_cycle':
 					evalWeatherCycle(ctx, row, row.config as WeatherCycleConfig, out);
+					break;
+				case 'infection':
+					await evalInfection(ctx, row, row.config as InfectionConfig, out, read, rows);
 					break;
 				case 'live_name':
 					// Written at the look itself, after the rules (live-name-write.ts): no action is queued.
@@ -1681,6 +1719,228 @@ function evalWeatherCycle(
 	row.lastFiredAt = ctx.ts;
 	row.state = state;
 	out.updates.push({ id: row.id, lastFiredAt: ctx.ts, lastResult: `Changing to ${name}`, state });
+}
+
+/**
+ * An Infection rule at one look (infection.ts): the round's start once the players are in, the moves
+ * that keep everyone on the side their role says, and what the round has come to. A Team balance
+ * rule on the same server would put the infected back on the smaller side, so the round waits while
+ * one is on.
+ */
+async function evalInfection(
+	ctx: TickContext,
+	row: TriggerRow,
+	cfg: InfectionConfig,
+	out: Evaluation,
+	read: StatsReader,
+	rows: TriggerRow[]
+) {
+	if (rows.some((r) => r.kind === 'two_teams')) {
+		const paused = 'Paused: switch off Team balance on this server to play Infection';
+		if (row.lastResult !== paused) {
+			row.lastResult = paused;
+			out.updates.push({ id: row.id, lastResult: paused });
+		}
+		return;
+	}
+	const config = infectionSettingsKey(cfg);
+	const mem = infectionMemory(ctx.server.id, row.id, config);
+	if (!ctx.playersObserved && !ctx.matchEnd) return;
+	const players: InfectionPlayer[] = ctx.playersObserved
+		? ctx.players.map((p) => ({ steamId: p.steamId, name: p.name, faction: p.faction }))
+		: [];
+	const now = ctx.ts.getTime();
+	const look = infectionLook(cfg, mem, {
+		players,
+		factions: (ctx.status.scores ?? []).map((s) => s.name),
+		matchEnded: !!ctx.matchEnd,
+		now,
+		// a few moves a second, as Team balance sends them
+		perLook: Math.min(
+			INFECTION_MAX_MOVES_PER_LOOK,
+			Math.max(
+				1,
+				Math.floor((TWO_TEAMS_MOVES_PER_SECOND * Math.max(ctx.playersIntervalMs, 1000)) / 1000)
+			)
+		)
+	});
+	const about = (p: InfectionPlayer | null): Player | null =>
+		p
+			? (ctx.players.find((q) => q.steamId === p.steamId) ?? {
+					...p,
+					kills: 0,
+					deaths: 0,
+					cash: 0,
+					ping: null
+				})
+			: null;
+	const stats = await statsFor(
+		read,
+		look.news.flatMap((n) =>
+			n.kind === 'last' ? [{ steamId: n.survivor.steamId, text: cfg.lastSurvivorMessage }] : []
+		),
+		{ org: false }
+	);
+	const say: InfectionSay = (text, p, own) =>
+		renderTemplate(
+			text,
+			keptVars(vars(ctx, about(p), p ? statsOf(stats, p.steamId) : {}, own)),
+			MAX_CHAT
+		);
+	pushInfection(out, row, cfg, mem, players, { moves: look.moves, news: look.news }, say, now);
+	if (look.result && look.result !== row.lastResult) {
+		row.lastResult = look.result;
+		out.updates.push({
+			id: row.id,
+			...(look.moves.length || look.news.length ? { lastFiredAt: ctx.ts } : {}),
+			lastResult: look.result
+		});
+	}
+}
+
+/** How an Infection rule's text reads for a player (or none), with the rule's own placeholders. */
+export type InfectionSay = (
+	text: string,
+	player: InfectionPlayer | null,
+	own: MessageVars
+) => string;
+
+/**
+ * The actions of an Infection rule's look or kill batch: each move (alone, without the kill: an
+ * infected survivor is dead already, and a player put back respawns where they belong), each newly
+ * infected player's whisper and broadcast, and the round's news. Every row carries the settings it
+ * was decided under, so an edit or a switch-off drops what is still queued.
+ */
+export function pushInfection(
+	out: Evaluation,
+	row: TriggerRow,
+	cfg: InfectionConfig,
+	mem: InfectionMemory,
+	players: InfectionPlayer[],
+	what: {
+		moves?: InfectionMove[];
+		news?: InfectionNews[];
+		infected?: { victim: InfectionPlayer; killer: InfectionPlayer; eventId: string }[];
+	},
+	say: InfectionSay,
+	now: number
+): void {
+	const config = infectionSettingsKey(cfg);
+	const round = mem.round;
+	const counts = () => roundCounts(mem, players);
+	const own = (extra: MessageVars = {}): MessageVars => ({
+		team: cfg.infectedFaction,
+		infected: counts().infected,
+		survivors: counts().survivors,
+		...extra
+	});
+	const broadcast = (
+		message: string,
+		subject: string,
+		detail: Record<string, unknown>,
+		k: string
+	) => {
+		if (!message) return;
+		out.intents.push({
+			trigger: row,
+			action: 'broadcast',
+			params: { message, rule: config },
+			target: message,
+			okMessage: `Announced ${subject}.`,
+			detail: { round, ...detail },
+			steamId: null,
+			dedupeKey: key(row, round, k)
+		});
+	};
+	for (const m of what.moves ?? [])
+		out.intents.push({
+			trigger: row,
+			action: 'changeTeam',
+			params: { steamId: m.steamId, faction: m.to, kill: false, from: m.from, rule: config },
+			target: m.steamId,
+			okMessage: `Moved ${m.name} to ${m.to}.`,
+			detail: { name: m.name, from: m.from, to: m.to, why: m.why, round },
+			steamId: m.steamId,
+			dedupeKey: key(row, round, m.steamId, now)
+		});
+	for (const i of what.infected ?? []) {
+		const victim = i.victim.name || i.victim.steamId;
+		const killer = i.killer.name || i.killer.steamId;
+		out.intents.push({
+			trigger: row,
+			action: 'changeTeam',
+			params: {
+				steamId: i.victim.steamId,
+				faction: cfg.infectedFaction,
+				kill: false,
+				from: i.victim.faction ?? '',
+				rule: config
+			},
+			target: i.victim.steamId,
+			okMessage: `${victim} was infected by ${killer}: moved to ${cfg.infectedFaction}.`,
+			detail: { name: victim, killer, to: cfg.infectedFaction, why: 'infected', round },
+			steamId: i.victim.steamId,
+			dedupeKey: key(row, round, i.victim.steamId, i.eventId)
+		});
+		if (cfg.infectWhisper)
+			out.intents.push({
+				trigger: row,
+				action: 'whisper',
+				params: {
+					steamId: i.victim.steamId,
+					message: say(cfg.infectWhisper, i.victim, own({ killer })),
+					rule: config
+				},
+				target: i.victim.steamId,
+				okMessage: `Whispered ${victim}.`,
+				detail: { name: victim, round },
+				steamId: i.victim.steamId,
+				dedupeKey: key(row, round, i.victim.steamId, i.eventId, 'told')
+			});
+		broadcast(
+			cfg.infectBroadcast && say(cfg.infectBroadcast, i.victim, own({ killer })),
+			`${victim}'s infection`,
+			{ name: victim, killer },
+			`${i.victim.steamId}:${i.eventId}:said`
+		);
+	}
+	for (const n of what.news ?? []) {
+		if (n.kind === 'start') {
+			const patients = n.patients.map((p) => p.name || p.steamId).join(', ');
+			broadcast(
+				cfg.startMessage && say(cfg.startMessage, null, own({ patients })),
+				'the round',
+				{ stage: 'start', patients },
+				'start'
+			);
+		} else if (n.kind === 'last') {
+			const name = n.survivor.name || n.survivor.steamId;
+			broadcast(
+				cfg.lastSurvivorMessage && say(cfg.lastSurvivorMessage, n.survivor, own()),
+				`the last survivor, ${name}`,
+				{ stage: 'last', name },
+				'last'
+			);
+		} else {
+			broadcast(
+				cfg.allInfectedMessage && say(cfg.allInfectedMessage, null, own()),
+				'the infection’s win',
+				{ stage: 'all' },
+				'all'
+			);
+			if (cfg.endMatch)
+				out.intents.push({
+					trigger: row,
+					action: 'endMatch',
+					params: { rule: config },
+					target: 'match',
+					okMessage: 'Ended the match: everyone is infected.',
+					detail: { stage: 'end', round },
+					steamId: null,
+					dedupeKey: key(row, round, 'end')
+				});
+		}
+	}
 }
 
 /**
@@ -2469,6 +2729,12 @@ export async function dryRun(
 	if (kind === 'faction_change') {
 		result.notes.push(
 			'Faction switches are not kept in the session history, so there is nothing to replay; the rule fires live when a player moves from one faction to another.'
+		);
+		return result;
+	}
+	if (kind === 'infection') {
+		result.notes.push(
+			'Faction moves are not kept in the session history, so a round cannot be replayed. Switch the rule on with a few players to see it live: who it moves and who it infects show under Actions as they happen.'
 		);
 		return result;
 	}

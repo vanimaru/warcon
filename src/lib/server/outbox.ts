@@ -343,6 +343,14 @@ function skipReason(row: OutboxRow, m: ReturnType<typeof memoryOf>): string | nu
 		const verdict = twoTeamsMoveVerdict(row);
 		if (verdict !== 'send' && verdict !== 'wait') return verdict;
 	}
+	// An Infection move for a player the last list shows on that side already (put back by an
+	// earlier move, or they switched themselves): the game would only be asked for nothing.
+	if (row.triggerKind === 'infection' && row.action === 'changeTeam') {
+		const to = String((row.params as { faction?: unknown } | null)?.faction ?? '');
+		const p = m.players.find((q) => q.steamId === row.steamId);
+		if (to && p?.faction && p.faction.trim().toLowerCase() === to.trim().toLowerCase())
+			return `Already on ${p.faction}.`;
+	}
 	return null;
 }
 

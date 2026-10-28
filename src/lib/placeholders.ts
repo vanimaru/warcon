@@ -103,6 +103,21 @@ export const MESSAGE_RULES: Readonly<Partial<Record<TriggerKind, MessageRule>>> 
 		own: ['target', 'streak', 'reward', 'days', 'until'],
 		player: true,
 		kept: true
+	},
+	// said to the whole server or to the newly infected: `{name}` is the player the message is about
+	// (the newly infected, the last survivor), `{killer}` who infected them, `{patients}` the round's
+	// first infected; `{infected}` and `{survivors}` count the players on each side as it stands
+	infection: {
+		fields: [
+			'startMessage',
+			'infectWhisper',
+			'infectBroadcast',
+			'lastSurvivorMessage',
+			'allInfectedMessage'
+		],
+		own: ['killer', 'team', 'patients', 'infected', 'survivors'],
+		player: true,
+		kept: true
 	}
 };
 

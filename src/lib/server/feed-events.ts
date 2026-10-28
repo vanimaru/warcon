@@ -2,8 +2,8 @@
 // event bus (the SSE route fans them to browsers; in the split roles every web process gets them
 // through the relay stream), and the team-kill rules get their turn. Their intents go through
 // the same outbox as every other trigger, so delivery, audit and the Discord mirror are shared.
-// The Kill rate, Kill distance, Name change and Bounty rules see every batch; the rest of the work is
-// for batches with team kills.
+// The Kill rate, Kill distance, Name change, Bounty and Infection rules see every batch; the rest of
+// the work is for batches with team kills.
 import { and, eq, gte, inArray, isNull, lte, sql } from 'drizzle-orm';
 import type { Env } from './env';
 import { emit } from './events';
@@ -12,6 +12,8 @@ import { killsOfMatch } from './matches';
 import {
 	bountyLapse,
 	enabledTriggers,
+	pushInfection,
+	type InfectionSay,
 	killDistanceAct,
 	renderTemplate,
 	statsFor,
@@ -77,6 +79,15 @@ import {
 	type BountyKill,
 	type BountyPlayer
 } from './bounty';
+import {
+	infectionKills,
+	infectionSettingsKey,
+	keepInfections,
+	knownInfection,
+	roundNews,
+	type InfectionConfig,
+	type InfectionPlayer
+} from './infection';
 import { isDemoServer } from './env';
 import { drainMockFeed } from './mockgame';
 import { ingestBatch } from './feed';
@@ -122,6 +133,12 @@ export async function onKillsIngested(
 	} catch (err) {
 		if (!(err instanceof LostOwnership))
 			console.warn(`[warcon] bounty rules on ${serverId}:`, publicMessage(err));
+	}
+	try {
+		await actOnInfection(env, serverId, kills, vars);
+	} catch (err) {
+		if (!(err instanceof LostOwnership))
+			console.warn(`[warcon] infection rules on ${serverId}:`, publicMessage(err));
 	}
 	const teamKills = kills.filter((k) => k.teamKill && k.killer);
 	if (!teamKills.length) return;
@@ -785,6 +802,90 @@ async function actOnBounty(
 }
 
 /**
+ * The Infection rule's kills (infection.ts): a survivor killed by an infected player joins the
+ * infected, moved at once while they lie dead so they respawn on that side, told, and announced when
+ * the rule says. The round must be known (a look takes it first), and the rule waits while a Team
+ * balance rule is on. Roles move on as the kills are read, before anything is written: a batch that
+ * cannot be written leaves its players infected, and the next look moves anyone still on the wrong
+ * side.
+ */
+async function actOnInfection(
+	env: Env,
+	serverId: string,
+	batch: KillView[],
+	vars: KillerVars
+): Promise<void> {
+	const enabled = await enabledTriggers(env, serverId);
+	const rows = enabled.filter((r) => r.kind === 'infection');
+	keepInfections(serverId, new Set(rows.map((r) => r.id)));
+	if (!rows.length || enabled.some((r) => r.kind === 'two_teams')) return;
+	const m = memoryOf(serverId);
+	const players: InfectionPlayer[] = (m?.players ?? []).map((p) => ({
+		steamId: p.steamId,
+		name: p.name,
+		faction: p.faction
+	}));
+	const sorted = [...batch].sort((a, b) => a.eventTime - b.eventTime);
+	const now = Date.now();
+	for (const row of rows) {
+		const cfg = row.config as InfectionConfig;
+		const mem = knownInfection(row.id, infectionSettingsKey(cfg));
+		if (!mem) continue;
+		const { infected } = infectionKills(
+			cfg,
+			mem,
+			sorted.map((k) => ({
+				eventId: k.eventId,
+				killer: k.killer,
+				victim: k.victim,
+				suicide: k.suicide
+			})),
+			now
+		);
+		if (!infected.length) continue;
+		const news = roundNews(mem, players);
+		const stats = await vars.stats(
+			[
+				...infected.flatMap((i) => [
+					{ steamId: i.victim.steamId, text: cfg.infectWhisper },
+					{ steamId: i.victim.steamId, text: cfg.infectBroadcast }
+				]),
+				...news.flatMap((n) =>
+					n.kind === 'last' ? [{ steamId: n.survivor.steamId, text: cfg.lastSurvivorMessage }] : []
+				)
+			],
+			{ org: false }
+		);
+		const say: InfectionSay = (text, p, own) =>
+			renderTemplate(
+				text,
+				keptVars(
+					p
+						? vars.about({ steamId: p.steamId, name: p.name, faction: p.faction }, stats, own)
+						: vars.bare(own)
+				),
+				MAX_CHAT
+			);
+		const out: Evaluation = { intents: [], updates: [] };
+		pushInfection(out, row, cfg, mem, players, { infected, news }, say, now);
+		const last = infected[infected.length - 1];
+		out.updates.push({
+			id: row.id,
+			lastFiredAt: new Date(now),
+			lastResult: news.some((n) => n.kind === 'all')
+				? 'Round over: everyone is infected'
+				: `${last.victim.name || last.victim.steamId} infected by ${last.killer.name || last.killer.steamId}`
+		});
+		let queued = 0;
+		await withOwnedTransaction(env, async (tx) => {
+			queued = await enqueueIntents(tx, serverId, out.intents);
+			await applyTriggerUpdates(tx, out.updates);
+		});
+		if (queued) wakeDelivery();
+	}
+}
+
+/**
  * The placeholders of a message about a kill's killer (or either of its players): the server as the
  * worker last saw it, the player (their side as the kill has it, their ping from the last player
  * list) and their stats, read once per player for the whole batch, whichever rules ask. Nothing is
@@ -814,7 +915,9 @@ function killerVars(env: Env, serverId: string) {
 		of: (k: KillView, stats: StatsRead, own: MessageVars): MessageVars =>
 			about(k.killer!, stats, own),
 		/** the same for either player of a kill, as the feed named them */
-		about
+		about,
+		/** the server's placeholders and a rule's own, about no player */
+		bare: (own: MessageVars): MessageVars => messageVars(look().server, null, {}, own)
 	};
 	function about(
 		who: { steamId: string; name: string; faction: string | null },

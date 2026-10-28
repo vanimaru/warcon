@@ -1,0 +1,307 @@
+import { describe, expect, test } from 'bun:test';
+import {
+	INFECTION_LATE_MS,
+	INFECTION_MAX_MOVES_PER_LOOK,
+	INFECTION_REASK_MS,
+	INFECTION_SETUP_WAIT_MS,
+	infectionKills,
+	infectionLook,
+	infectionSpeaks,
+	newInfectionMemory,
+	roundCounts,
+	roundNews,
+	validateInfection,
+	type InfectionConfig,
+	type InfectionPlayer
+} from './infection';
+
+const FACTIONS = ['Valkyra', 'Lonestar', 'Manticore'];
+const cfg: InfectionConfig = validateInfection({
+	infectedFaction: 'Manticore',
+	survivorFaction: 'Lonestar',
+	startInfected: 1,
+	minPlayers: 4
+});
+const p = (n: number, faction: string | null): InfectionPlayer => ({
+	steamId: `7656119800000${String(n).padStart(4, '0')}`,
+	name: `P${n}`,
+	faction
+});
+/** the first draw always: the first player picked */
+const first = () => 0;
+
+describe('Infection settings', () => {
+	test('two different factions, a count of first infected, texts defaulted', () => {
+		expect(cfg.infectedFaction).toBe('Manticore');
+		expect(cfg.startInfected).toBe(1);
+		expect(cfg.startMessage).toContain('{patients}');
+		expect(() =>
+			validateInfection({ infectedFaction: 'Lonestar', survivorFaction: 'lonestar' })
+		).toThrow('two different factions');
+		expect(() => validateInfection({ infectedFaction: '', survivorFaction: 'Lonestar' })).toThrow();
+		expect(validateInfection({ ...cfg, startInfected: 99 }).startInfected).toBe(10);
+	});
+	test('a rule with every text blank says nothing, so it needs no Chat', () => {
+		expect(infectionSpeaks(cfg)).toBe(true);
+		expect(
+			infectionSpeaks(
+				validateInfection({
+					...cfg,
+					startMessage: '',
+					infectWhisper: '',
+					infectBroadcast: '',
+					lastSurvivorMessage: '',
+					allInfectedMessage: ''
+				})
+			)
+		).toBe(false);
+	});
+});
+
+describe('a round', () => {
+	test('a new rule takes the server as it is: the infected side infected, the round on', () => {
+		const mem = newInfectionMemory('k');
+		const players = [p(1, 'Manticore'), p(2, 'Lonestar'), p(3, 'Lonestar'), p(4, 'Valkyra')];
+		const look = infectionLook(cfg, mem, {
+			players,
+			factions: FACTIONS,
+			matchEnded: false,
+			now: 0
+		});
+		expect(mem.phase).toBe('running');
+		expect(mem.roles.get(p(1, null).steamId)).toBe('infected');
+		// the third faction is put on the survivors' side; nobody else moves
+		expect(look.moves.map((m) => [m.name, m.to])).toEqual([['P4', 'Lonestar']]);
+		expect(look.news).toEqual([]);
+	});
+
+	test('with nobody infected, a round starts: the patients picked, everyone else a survivor', () => {
+		const mem = newInfectionMemory('k');
+		const players = [p(1, 'Lonestar'), p(2, 'Valkyra'), p(3, 'Lonestar'), p(4, 'Lonestar')];
+		const look = infectionLook(cfg, mem, {
+			players,
+			factions: FACTIONS,
+			matchEnded: false,
+			now: 1000,
+			rand: first
+		});
+		expect(mem.phase).toBe('running');
+		expect(look.news).toEqual([{ kind: 'start', patients: [players[0]] }]);
+		expect(look.moves.map((m) => [m.name, m.to, m.why])).toEqual([
+			['P1', 'Manticore', 'start'],
+			['P2', 'Lonestar', 'start']
+		]);
+		expect(look.result).toBe('Round started: P1 infected');
+	});
+
+	test('waits for enough players, and for most of them to pick a side', () => {
+		const mem = newInfectionMemory('k');
+		const few = [p(1, 'Lonestar'), p(2, 'Lonestar')];
+		let look = infectionLook(cfg, mem, {
+			players: few,
+			factions: FACTIONS,
+			matchEnded: false,
+			now: 0
+		});
+		expect(look.result).toBe('Waiting for 4 players');
+		const unpicked = [p(1, 'Lonestar'), p(2, 'Lonestar'), p(3, null), p(4, null)];
+		look = infectionLook(cfg, mem, {
+			players: unpicked,
+			factions: FACTIONS,
+			matchEnded: false,
+			now: 1
+		});
+		expect(mem.phase).toBe('waiting');
+		expect(look.moves).toEqual([]);
+		// ... or for the wait
+		look = infectionLook(cfg, mem, {
+			players: unpicked,
+			factions: FACTIONS,
+			matchEnded: false,
+			now: 1 + INFECTION_SETUP_WAIT_MS,
+			rand: first
+		});
+		expect(mem.phase).toBe('running');
+		expect(look.news[0]).toMatchObject({ kind: 'start' });
+	});
+
+	test('a match without the rule’s factions waits, and says so', () => {
+		const mem = newInfectionMemory('k');
+		const look = infectionLook(cfg, mem, {
+			players: [p(1, 'Valkyra'), p(2, 'Lonestar'), p(3, 'Lonestar'), p(4, 'Lonestar')],
+			factions: ['Valkyra', 'Lonestar'],
+			matchEnded: false,
+			now: 0
+		});
+		expect(look.result).toBe('Waiting: this match has no Manticore faction');
+		expect(look.moves).toEqual([]);
+	});
+
+	test('an infected player’s kill of a survivor infects them; other kills do not', () => {
+		const mem = newInfectionMemory('k');
+		const players = [p(1, 'Manticore'), p(2, 'Lonestar'), p(3, 'Lonestar'), p(4, 'Lonestar')];
+		infectionLook(cfg, mem, { players, factions: FACTIONS, matchEnded: false, now: 0 });
+		const kill = (
+			id: string,
+			killer: InfectionPlayer | null,
+			victim: InfectionPlayer,
+			suicide = false
+		) => ({
+			eventId: id,
+			killer,
+			victim,
+			suicide
+		});
+		const { infected } = infectionKills(
+			cfg,
+			mem,
+			[
+				kill('a', players[2], players[0]), // a survivor kills the infected: nothing
+				kill('b', players[1], players[2]), // a survivor kills a survivor: nothing
+				kill('c', null, players[3]), // the environment
+				kill('d', players[0], players[1]), // infected!
+				kill('e', players[0], players[1]) // already infected
+			],
+			5000
+		);
+		expect(infected.map((i) => [i.victim.name, i.killer.name, i.eventId])).toEqual([
+			['P2', 'P1', 'd']
+		]);
+		expect(mem.roles.get(players[1].steamId)).toBe('infected');
+		// the next look does not ask again while the feed's move is on its way
+		const look = infectionLook(cfg, mem, {
+			players,
+			factions: FACTIONS,
+			matchEnded: false,
+			now: 6000
+		});
+		expect(look.moves).toEqual([]);
+		expect(roundCounts(mem, players)).toEqual({ infected: 2, survivors: 2 });
+	});
+
+	test('the last survivor is told once, and the round ends with none', () => {
+		const mem = newInfectionMemory('k');
+		const players = [p(1, 'Manticore'), p(2, 'Manticore'), p(3, 'Lonestar'), p(4, 'Lonestar')];
+		infectionLook(cfg, mem, { players, factions: FACTIONS, matchEnded: false, now: 0 });
+		infectionKills(
+			cfg,
+			mem,
+			[{ eventId: 'x', killer: players[0], victim: players[2], suicide: false }],
+			1
+		);
+		expect(roundNews(mem, players)).toEqual([{ kind: 'last', survivor: players[3] }]);
+		expect(roundNews(mem, players)).toEqual([]);
+		infectionKills(
+			cfg,
+			mem,
+			[{ eventId: 'y', killer: players[1], victim: players[3], suicide: false }],
+			2
+		);
+		expect(roundNews(mem, players)).toEqual([{ kind: 'all' }]);
+		expect(mem.phase).toBe('over');
+		// over: no more infections, no more news, until the match ends
+		expect(roundNews(mem, players)).toEqual([]);
+	});
+
+	test('a player who switches is put back; a survivor who joins the infected stays infected', () => {
+		const mem = newInfectionMemory('k');
+		const players = [p(1, 'Manticore'), p(2, 'Lonestar'), p(3, 'Lonestar'), p(4, 'Lonestar')];
+		infectionLook(cfg, mem, { players, factions: FACTIONS, matchEnded: false, now: 0 });
+		const switched = [p(1, 'Lonestar'), p(2, 'Manticore'), p(3, 'Lonestar'), p(4, 'Lonestar')];
+		const look = infectionLook(cfg, mem, {
+			players: switched,
+			factions: FACTIONS,
+			matchEnded: false,
+			now: 10_000
+		});
+		expect(look.moves.map((m) => [m.name, m.to, m.why])).toEqual([['P1', 'Manticore', 'back']]);
+		expect(mem.roles.get(players[1].steamId)).toBe('infected');
+		// asked once; again only after the wait
+		expect(
+			infectionLook(cfg, mem, {
+				players: switched,
+				factions: FACTIONS,
+				matchEnded: false,
+				now: 20_000
+			}).moves
+		).toEqual([]);
+		expect(
+			infectionLook(cfg, mem, {
+				players: switched,
+				factions: FACTIONS,
+				matchEnded: false,
+				now: 10_000 + INFECTION_REASK_MS
+			}).moves.map((m) => m.name)
+		).toEqual(['P1']);
+	});
+
+	test('a late joiner joins the infected; one at the start is a survivor', () => {
+		const mem = newInfectionMemory('k');
+		const players = [p(1, 'Lonestar'), p(2, 'Lonestar'), p(3, 'Lonestar'), p(4, 'Lonestar')];
+		infectionLook(cfg, mem, {
+			players,
+			factions: FACTIONS,
+			matchEnded: false,
+			now: 0,
+			rand: first
+		});
+		const early = [...players, p(5, 'Valkyra')];
+		let look = infectionLook(cfg, mem, {
+			players: early,
+			factions: FACTIONS,
+			matchEnded: false,
+			now: 5000
+		});
+		expect(look.moves.find((m) => m.name === 'P5')).toMatchObject({ to: 'Lonestar' });
+		const late = [...early, p(6, 'Lonestar')];
+		look = infectionLook(cfg, mem, {
+			players: late,
+			factions: FACTIONS,
+			matchEnded: false,
+			now: INFECTION_LATE_MS + 1
+		});
+		expect(look.moves.find((m) => m.name === 'P6')).toMatchObject({ to: 'Manticore', why: 'late' });
+	});
+
+	test('a new match starts a new round, whatever the last one came to', () => {
+		const mem = newInfectionMemory('k');
+		const players = [p(1, 'Manticore'), p(2, 'Manticore'), p(3, 'Manticore'), p(4, 'Manticore')];
+		// everyone on the infected side: the round taken as it is, and it is over
+		infectionLook(cfg, mem, { players, factions: FACTIONS, matchEnded: false, now: 0 });
+		expect(mem.phase).toBe('over');
+		const round = mem.round;
+		const look = infectionLook(cfg, mem, {
+			players,
+			factions: FACTIONS,
+			matchEnded: true,
+			now: 100_000,
+			rand: first
+		});
+		expect(mem.round).toBeGreaterThan(round);
+		expect(look.news[0]).toEqual({ kind: 'start', patients: [players[0]] });
+		expect(look.moves.map((m) => m.to)).toEqual(['Lonestar', 'Lonestar', 'Lonestar']);
+	});
+
+	test('a full server is sorted a few moves a look', () => {
+		const mem = newInfectionMemory('k');
+		const players = Array.from({ length: 30 }, (_, i) => p(i, 'Valkyra'));
+		const look = infectionLook(cfg, mem, {
+			players,
+			factions: FACTIONS,
+			matchEnded: false,
+			now: 0,
+			rand: first
+		});
+		expect(look.moves.length).toBe(INFECTION_MAX_MOVES_PER_LOOK);
+		const next = infectionLook(cfg, mem, {
+			players,
+			factions: FACTIONS,
+			matchEnded: false,
+			now: 2000
+		});
+		expect(next.moves.length).toBe(INFECTION_MAX_MOVES_PER_LOOK);
+		expect(new Set([...look.moves, ...next.moves].map((m) => m.steamId)).size).toBe(
+			2 * INFECTION_MAX_MOVES_PER_LOOK
+		);
+	});
+});
