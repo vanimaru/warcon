@@ -101,6 +101,12 @@ export const RULE_KINDS: { kind: TriggerKind; group: RuleGroup; label: string; b
 			'A game mode: a few players start infected, and every survivor they kill joins them. The last survivors win.'
 	},
 	{
+		kind: 'kill_race',
+		group: 'In play',
+		label: 'Kill race',
+		blurb: 'A team deathmatch: the first side to a number of kills wins, and the match is ended.'
+	},
+	{
 		kind: 'seed_reward',
 		group: 'Seeding and rewards',
 		label: 'Seeding reward',
@@ -166,7 +172,8 @@ export const RULE_KINDS: { kind: TriggerKind; group: RuleGroup; label: string; b
  * rules would each undo the other's order, two Live server name rules would each write their own
  * name over the other's, two Skip map after restart rules would end the match twice, two Weather
  * cycle rules would each change the weather on a clock of their own, two Infection rules would each
- * move players to sides of their own. The picker opens the one a server has.
+ * move players to sides of their own, two Kill race rules would each end the match on a count of their
+ * own. The picker opens the one a server has.
  */
 export const ONE_PER_SERVER: TriggerKind[] = [
 	'seed_reward',
@@ -177,7 +184,8 @@ export const ONE_PER_SERVER: TriggerKind[] = [
 	'live_name',
 	'restart_skip',
 	'weather_cycle',
-	'infection'
+	'infection',
+	'kill_race'
 ];
 
 /**
@@ -204,7 +212,8 @@ export const FEED_KINDS: TriggerKind[] = [
 	'kill_rate',
 	'kill_distance',
 	'bounty',
-	'infection'
+	'infection',
+	'kill_race'
 ];
 
 /**

@@ -587,7 +587,8 @@ export type TriggerKind =
 	| 'live_name'
 	| 'restart_skip'
 	| 'weather_cycle'
-	| 'infection';
+	| 'infection'
+	| 'kill_race';
 
 export interface TriggerView {
 	id: string;

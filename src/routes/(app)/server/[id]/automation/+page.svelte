@@ -6,6 +6,7 @@
 	import { fmtAgo, fmtSpan, fmtTime, lightingLabel, mapLabel } from '$lib/format';
 	import { can } from '$lib/capabilities';
 	import { INFECTION_DEFAULTS } from '$lib/infection-defaults';
+	import { KILL_RACE_DEFAULTS } from '$lib/kill-race-defaults';
 	import {
 		causeKind,
 		causeLabel,
@@ -220,6 +221,12 @@
 				return canMatch
 					? ''
 					: 'Saving needs the Match control capability as well as Automation: the rule changes the weather.';
+			case 'kill_race':
+				return !data.feed
+					? 'Needs the kill feed, which is off on this server. Turn it on under Config.'
+					: !canMatch
+						? 'Saving needs the Match control capability as well as Automation: the rule ends the match.'
+						: '';
 			case 'infection':
 				return !data.feed
 					? 'Needs the kill feed, which is off on this server. Turn it on under Config.'
@@ -337,7 +344,7 @@
 				  kind === 'kill_rate' ||
 				  kind === 'kill_distance' ||
 				  kind === 'name_change' ||
-				  ((kind === 'bounty' || kind === 'infection') && !data.feed)
+				  ((kind === 'bounty' || kind === 'infection' || kind === 'kill_race') && !data.feed)
 				? 'Needs the kill feed'
 				: kind === 'infection'
 					? 'Needs Move'
@@ -351,7 +358,8 @@
 									? 'Needs Config & settings'
 									: kind === 'empty_reset' ||
 										  kind === 'restart_skip' ||
-										  kind === 'weather_cycle'
+										  kind === 'weather_cycle' ||
+										  kind === 'kill_race'
 										? 'Needs Match control'
 										: '';
 	/** A Bounty rule's texts until they are written: a slot is named, an announcement-only rule asks. */
@@ -559,7 +567,6 @@
 		perPlayers: number;
 		/** survivor counts to announce, comma-separated */
 		milestones: string;
-		startMessage: string;
 		infectWhisper: string;
 		infectBroadcast: string;
 		fewLeftMessage: string;
@@ -572,6 +579,14 @@
 		timeLimitMinutes: number;
 		timeWarnings: string;
 		timeLeftMessage: string;
+		/** a Kill race rule's kills to win, what counts, how often the standings are told, and texts */
+		raceTarget: number;
+		headshotsOnly: boolean;
+		teamKillsSubtract: boolean;
+		announceEvery: number;
+		progressMessage: string;
+		winMessage: string;
+		drawMessage: string;
 	}
 	/** An Infection rule's texts, in the order a round goes, with what each is for. */
 	const INFECTION_TEXTS = [
@@ -584,6 +599,14 @@
 		['allInfectedMessage', 'When everyone is infected'],
 		['survivorsWinMessage', 'As the match ends with a survivors’ side ahead'],
 		['infectedWinMessage', 'As the match ends with the infected ahead']
+	] as const;
+	/** A Kill race rule's texts, in the order a match goes, with what each is for. */
+	const RACE_TEXTS = [
+		['startMessage', 'As a match starts'],
+		['progressMessage', 'Each time the leader passes a step'],
+		['timeLeftMessage', 'As the time left falls to each warning'],
+		['winMessage', 'When a side wins'],
+		['drawMessage', 'When the time runs out on a tie']
 	] as const;
 	/** WARDOGS' factions, offered for Team balance; a name the game adds later can still be typed. */
 	const FACTIONS = ['Lonestar', 'Valkyra', 'Manticore'];
@@ -778,7 +801,14 @@
 			),
 			repeatMinutes: n('repeatMinutes', 0),
 			endMessage: s('endMessage', 'Match over: {faction} wins on {previous} · {scores}'),
-			startMessage: s('startMessage', 'New match on {map}. Good luck!'),
+			startMessage: s(
+				'startMessage',
+				kind === 'infection'
+					? INFECTION_DEFAULTS.startMessage
+					: kind === 'kill_race'
+						? KILL_RACE_DEFAULTS.startMessage
+						: 'New match on {map}. Good luck!'
+			),
 			warnAt: n('warnAt', 2),
 			warnMessage: s(
 				'warnMessage',
@@ -864,7 +894,6 @@
 			milestones: Array.isArray(c.milestones)
 				? (c.milestones as number[]).join(', ')
 				: '25, 10, 5',
-			startMessage: s('startMessage', INFECTION_DEFAULTS.startMessage),
 			infectWhisper: s('infectWhisper', INFECTION_DEFAULTS.infectWhisper),
 			infectBroadcast: s('infectBroadcast', INFECTION_DEFAULTS.infectBroadcast),
 			fewLeftMessage: s('fewLeftMessage', INFECTION_DEFAULTS.fewLeftMessage),
@@ -874,11 +903,23 @@
 			infectedWinMessage: s('infectedWinMessage', INFECTION_DEFAULTS.infectedWinMessage),
 			endMatch: b('endMatch', false),
 			// a new rule plays to a 20-minute limit; an older one keeps none until it is given one
-			timeLimitMinutes: n('timeLimitMinutes', t ? 0 : 20),
+			timeLimitMinutes: n('timeLimitMinutes', t || kind !== 'infection' ? 0 : 20),
 			timeWarnings: Array.isArray(c.timeWarnings)
 				? (c.timeWarnings as number[]).join(', ')
 				: '5, 1',
-			timeLeftMessage: s('timeLeftMessage', INFECTION_DEFAULTS.timeLeftMessage)
+			timeLeftMessage: s(
+				'timeLeftMessage',
+				kind === 'kill_race'
+					? KILL_RACE_DEFAULTS.timeLeftMessage
+					: INFECTION_DEFAULTS.timeLeftMessage
+			),
+			raceTarget: n('target', 100),
+			headshotsOnly: b('headshotsOnly', false),
+			teamKillsSubtract: b('teamKillsSubtract', false),
+			announceEvery: n('announceEvery', 25),
+			progressMessage: s('progressMessage', KILL_RACE_DEFAULTS.progressMessage),
+			winMessage: s('winMessage', KILL_RACE_DEFAULTS.winMessage),
+			drawMessage: s('drawMessage', KILL_RACE_DEFAULTS.drawMessage)
 		};
 		dry = null;
 		pendingSel =
@@ -1079,6 +1120,23 @@
 				return { base: f.liveBase, append: f.liveAppend };
 			case 'restart_skip':
 				return {};
+			case 'kill_race':
+				return {
+					target: Number(f.raceTarget),
+					headshotsOnly: f.headshotsOnly,
+					teamKillsSubtract: f.teamKillsSubtract,
+					announceEvery: Number(f.announceEvery) || 0,
+					timeLimitMinutes: Number(f.timeLimitMinutes) || 0,
+					timeWarnings: f.timeWarnings
+						.split(/[\s,]+/)
+						.filter(Boolean)
+						.map(Number),
+					startMessage: f.startMessage,
+					progressMessage: f.progressMessage,
+					winMessage: f.winMessage,
+					drawMessage: f.drawMessage,
+					timeLeftMessage: f.timeLeftMessage
+				};
 			case 'infection':
 				return {
 					infectedFaction: f.infectedFaction.trim(),
@@ -1346,6 +1404,15 @@
 					.filter(Boolean)
 					.join(' · ');
 			}
+			case 'kill_race':
+				return [
+					`first side to ${c.target} ${c.headshotsOnly ? 'headshot kills' : 'kills'} wins`,
+					c.teamKillsSubtract ? 'team kills count against' : '',
+					Number(c.announceEvery) > 0 ? `standings every ${c.announceEvery}` : '',
+					Number(c.timeLimitMinutes) > 0 ? `${c.timeLimitMinutes} min limit` : ''
+				]
+					.filter(Boolean)
+					.join(' · ');
 			case 'infection': {
 				const n = Number(c.startInfected) || 1;
 				const per = Number(c.perPlayers) || 0;
@@ -1710,6 +1777,13 @@
 			>
 		{:else if r.kind === 'afk_watch' || r.kind === 'infection'}
 			<span>Nothing to replay</span>
+		{:else if r.kind === 'kill_race'}
+			<span
+				>Replayed the last 24 h on this server: a side would have won <b
+					class={r.fires ? 'text-warn' : 'text-ok'}>{r.fires}</b
+				>
+				match{r.fires === 1 ? '' : 'es'}</span
+			>
 		{:else if r.kind === 'weather_cycle'}
 			<span
 				>Replayed the last 24 h on this server: would have changed the weather <b
@@ -2268,6 +2342,96 @@
 						infected side: switch it off on the Config tab; the rule's row warns while
 						it is on. Moves are under Recent actions and in the audit trail; Discord
 						hears only of the ones that fail. One rule per server.
+					</p>
+				{:else if f.kind === 'kill_race'}
+					<fieldset class="space-y-2">
+						<legend class="field-label">To win</legend>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							The first side to
+							<input
+								class="input w-24 text-right"
+								type="number"
+								min="5"
+								max="5000"
+								bind:value={f.raceTarget}
+								aria-label="Kills to win"
+								required
+							/>
+							kills wins, and the match is ended.
+						</div>
+						<label class="flex items-center gap-2 text-[13px]"
+							><input type="checkbox" bind:checked={f.headshotsOnly} /> Only headshots count</label
+						>
+						<label class="flex items-center gap-2 text-[13px]"
+							><input type="checkbox" bind:checked={f.teamKillsSubtract} /> A team kill takes one off
+							the killer's side</label
+						>
+					</fieldset>
+					<fieldset class="space-y-2">
+						<legend class="field-label">Along the way</legend>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							Announce the standings every
+							<input
+								class="input w-20 text-right"
+								type="number"
+								min="0"
+								max="5000"
+								bind:value={f.announceEvery}
+								aria-label="Announce the standings every, kills (0 for never)"
+							/>
+							kills of the leader (0: never)
+						</div>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							Time limit
+							<input
+								class="input w-20 text-right"
+								type="number"
+								min="0"
+								max="180"
+								bind:value={f.timeLimitMinutes}
+								aria-label="Time limit, minutes (0 for none)"
+							/>
+							min from the match's start (0: none): the side with the most kills then wins. Announce
+							the time left at
+							<input
+								class="input w-28"
+								type="text"
+								data-plain
+								bind:value={f.timeWarnings}
+								placeholder="5, 1"
+								aria-label="Minutes left to announce"
+							/>
+							min
+						</div>
+					</fieldset>
+					<fieldset class="space-y-3">
+						<legend class="field-label">Messages (each optional)</legend>
+						{#each RACE_TEXTS as [k, title] (k)}
+							<label class="block space-y-1 text-[13px]"
+								><span class="text-mist-400">{title}</span>
+								<input class="input" type="text" bind:value={f[k]} maxlength={MAX_CHAT} /></label
+							>
+						{/each}
+						{@render placeholders('kill_race', [
+							f.startMessage,
+							f.progressMessage,
+							f.timeLeftMessage,
+							f.winMessage,
+							f.drawMessage
+						])}
+						<p class="text-[12px] text-mist-600">
+							{'{standings}'} lists every side's kills, {'{winner}'} and {'{kills}'} the side that
+							won and its count, {'{top}'} the player with the most kills, {'{target}'} the kills to
+							win and {'{minutes}'} the time left. Empty sends nothing.
+						</p>
+					</fieldset>
+					<p class="note">
+						The game's own scoring still runs: a side that holds the control zone scores, and the
+						first to the cap ends the match. The rule counts each side's kills from the kill feed
+						on top of that, suicides and the environment left out, and the first side to the target
+						wins: the rule announces it and ends the match. A match the game ends first is told by
+						its kills as they stood. The counts are read from the kills stored for the match, so a
+						worker restart keeps them. Needs the kill feed and Match control. One rule per server.
 					</p>
 				{:else if f.kind === 'restart_skip'}
 					<div class="space-y-1.5 text-[13px]">

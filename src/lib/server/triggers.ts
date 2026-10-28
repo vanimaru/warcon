@@ -29,6 +29,8 @@
 //                (weather-cycle.ts)
 //   infection    a game mode: a few players start each round infected, and a survivor they kill
 //                joins them (infection.ts; the infections are acted on in feed-events.ts)
+//   kill_race    a team deathmatch: the first side to a number of kills wins and the match is
+//                ended (kill-race.ts; counted as kills arrive, in feed-events.ts)
 // The worker evaluates them on every observation and writes the actions they want to the outbox
 // (outbox.ts delivers, and every delivery lands in the audit trail as category "trigger"). A dry
 // run replays the last 24 hours from the samples and sessions tables so a rule can be checked
@@ -245,6 +247,17 @@ import {
 	type InfectionNews,
 	type InfectionPlayer
 } from './infection';
+import {
+	keepRaces,
+	killRaceSettingsKey,
+	killRaceSpeaks,
+	knownRace,
+	raceAtMatchEnd,
+	raceClock,
+	standings as raceStandings,
+	type KillRaceConfig,
+	type RaceNews
+} from './kill-race';
 import { mapName } from '$lib/format';
 import type { TeamLock } from '$lib/team-lock';
 import { statsIn, usesStats } from '$lib/placeholders';
@@ -270,6 +283,8 @@ const WINDOW_MS = 24 * 3600_000;
 const KILL_RATE_REPLAY_MAX = 200_000;
 /** The most kills one Name change dry run reads names from. */
 const NAME_CHANGE_REPLAY_MAX = 200_000;
+
+const KILL_RACE_REPLAY_MAX = 200_000;
 /** The most sessions it reads the listed names from (a busy server has a couple of thousand a day). */
 const NAME_SESSIONS_MAX = 20_000;
 
@@ -356,6 +371,7 @@ const RULE_NEEDS: Record<
 	kill_rate: ['players.kick', 'flags players'],
 	two_teams: ['players.move', 'moves players between teams'],
 	infection: ['players.move', 'moves players between teams'],
+	kill_race: ['match.control', 'ends the match'],
 	afk_protection: ['players.kill', 'kills players'],
 	name_change: ['players.kick', 'flags or kicks players'],
 	rotation_shuffle: ['config.apply', 'rewrites the rotation in the config document'],
@@ -411,6 +427,8 @@ function ruleAlsoNeeds(kind: TriggerKind, config: unknown): [Capability, string]
 	if (kind === 'afk_protection' && (str(afk?.message) || str(afk?.doneMessage)))
 		return ['chat.send', 'messages players'];
 	if (kind === 'infection' && infectionSpeaks(config as Partial<InfectionConfig> | null))
+		return ['chat.send', 'messages players'];
+	if (kind === 'kill_race' && killRaceSpeaks(config as Partial<KillRaceConfig> | null))
 		return ['chat.send', 'messages players'];
 	return null;
 }
@@ -623,7 +641,8 @@ export const SETTINGS_KEYS: Partial<Record<string, (config: unknown) => string>>
 	name_change: (c) => nameChangeSettingsKey(c as NameChangeConfig),
 	restart_skip: () => RESTART_SKIP_KEY,
 	weather_cycle: (c) => weatherCycleSettingsKey(c as WeatherCycleConfig),
-	infection: (c) => infectionSettingsKey(c as InfectionConfig)
+	infection: (c) => infectionSettingsKey(c as InfectionConfig),
+	kill_race: (c) => killRaceSettingsKey(c as KillRaceConfig)
 };
 
 /**
@@ -885,6 +904,7 @@ export async function evaluateTriggers(
 	const out: Evaluation = { intents: [], updates: [] };
 	// Stats are read only for a message that uses them, once per player whichever rules ask.
 	const read = statsReader(env, ctx.server.id);
+	keepRaces(ctx.server.id, new Set(rows.filter((r) => r.kind === 'kill_race').map((r) => r.id)));
 	keepInfections(
 		ctx.server.id,
 		new Set(rows.filter((r) => r.kind === 'infection').map((r) => r.id))
@@ -952,6 +972,10 @@ export async function evaluateTriggers(
 					break;
 				case 'infection':
 					await evalInfection(ctx, row, row.config as InfectionConfig, out, read, rows);
+					break;
+				case 'kill_race':
+					// Counted as kills arrive (feed-events.ts); a look keeps the clock and the match's end.
+					evalKillRace(ctx, row, row.config as KillRaceConfig, out);
 					break;
 				case 'live_name':
 					// Written at the look itself, after the rules (live-name-write.ts): no action is queued.
@@ -1812,6 +1836,133 @@ async function evalInfection(
 const INFECTION_LOCK_MARK = ' · ';
 const infectionLockNote = (threshold: number) =>
 	`Warning: the game locks a team ${threshold} ahead (Lock overpopulated teams), so moves onto the infected side can be refused: switch it off on the Config tab`;
+
+/**
+ * A Kill race rule at one look (kill-race.ts): as a match ends, the race as its kills stood (when
+ * the game's cap came first) and the next match's opening line; between, the time limit's clock.
+ */
+function evalKillRace(ctx: TickContext, row: TriggerRow, cfg: KillRaceConfig, out: Evaluation) {
+	const mem = knownRace(row.id, killRaceSettingsKey(cfg));
+	const say = (text: string, own: MessageVars) =>
+		renderTemplate(text, keptVars(vars(ctx, null, {}, own)), MAX_CHAT);
+	if (ctx.matchEnd) {
+		if (mem) pushRace(out, row, cfg, mem.match, raceAtMatchEnd(mem), say);
+		if (cfg.startMessage)
+			out.intents.push({
+				trigger: row,
+				action: 'broadcast',
+				params: {
+					message: say(cfg.startMessage, { target: cfg.target }),
+					rule: killRaceSettingsKey(cfg)
+				},
+				target: 'start',
+				okMessage: 'Announced the kill race.',
+				detail: { stage: 'start', target: cfg.target },
+				steamId: null,
+				dedupeKey: key(row, 'start', ctx.ts.getTime())
+			});
+		return;
+	}
+	if (!mem) return;
+	pushRace(out, row, cfg, mem.match, raceClock(cfg, mem, ctx.ts.getTime()), say);
+}
+
+/**
+ * The actions of a Kill race rule's news: the standings, the time left, and the result, with the
+ * match ended when the race decided it (the target reached, or the time up). Keyed by the match, so
+ * a restart that decides it again sends nothing twice.
+ */
+export function pushRace(
+	out: Evaluation,
+	row: TriggerRow,
+	cfg: KillRaceConfig,
+	match: string,
+	news: RaceNews[],
+	say: (text: string, own: MessageVars) => string
+): void {
+	const config = killRaceSettingsKey(cfg);
+	const broadcast = (text: string, subject: string, detail: Record<string, unknown>, k: string) => {
+		if (!text) return;
+		out.intents.push({
+			trigger: row,
+			action: 'broadcast',
+			params: { message: text, rule: config },
+			target: text,
+			okMessage: `Announced ${subject}.`,
+			detail: { match, ...detail },
+			steamId: null,
+			dedupeKey: key(row, match, k)
+		});
+	};
+	const end = (why: string) =>
+		out.intents.push({
+			trigger: row,
+			action: 'endMatch',
+			params: { rule: config },
+			target: 'match',
+			okMessage: `Ended the match: ${why}.`,
+			detail: { match, stage: 'end' },
+			steamId: null,
+			dedupeKey: key(row, match, 'end')
+		});
+	for (const n of news) {
+		const table = raceStandings(n.tally);
+		const own = (extra: MessageVars = {}): MessageVars => ({
+			target: cfg.target,
+			standings: table,
+			top: n.tally.top ? `${n.tally.top.name} (${n.tally.top.kills})` : 'nobody',
+			...extra
+		});
+		if (n.kind === 'progress') {
+			const lead = n.tally.sides[0]?.kills ?? 0;
+			broadcast(
+				cfg.progressMessage && say(cfg.progressMessage, own()),
+				'the standings',
+				{ stage: 'progress', standings: table },
+				`progress:${cfg.announceEvery ? Math.floor(lead / cfg.announceEvery) : lead}`
+			);
+		} else if (n.kind === 'time') {
+			broadcast(
+				cfg.timeLeftMessage && say(cfg.timeLeftMessage, own({ minutes: n.minutes })),
+				`${n.minutes} min left`,
+				{ stage: 'time', minutes: n.minutes },
+				`time:${n.minutes}`
+			);
+		} else if (n.kind === 'win') {
+			broadcast(
+				cfg.winMessage && say(cfg.winMessage, own({ winner: n.winner, kills: n.kills })),
+				`${n.winner}'s win`,
+				{ stage: 'win', winner: n.winner, kills: n.kills, why: n.why, standings: table },
+				'result'
+			);
+			if (n.why !== 'match')
+				end(
+					n.why === 'target'
+						? `${n.winner} reached ${cfg.target} kills`
+						: `time is up, ${n.winner} ahead on kills`
+				);
+			out.updates.push({
+				id: row.id,
+				lastFiredAt: new Date(),
+				lastResult: `${n.winner} won with ${n.kills} kills (${table})`.slice(0, 300)
+			});
+		} else {
+			const kills = n.tally.sides[0]?.kills ?? 0;
+			broadcast(
+				cfg.drawMessage && say(cfg.drawMessage, own({ kills })),
+				'a draw',
+				{ stage: 'draw', why: n.why, standings: table },
+				'result'
+			);
+			if (n.why === 'time') end('time is up, a draw on kills');
+			out.updates.push({
+				id: row.id,
+				lastFiredAt: new Date(),
+				lastResult: `A draw at ${kills} kills (${table})`.slice(0, 300)
+			});
+		}
+	}
+}
 
 /** How an Infection rule's text reads for a player (or none), with the rule's own placeholders. */
 export type InfectionSay = (
@@ -2795,6 +2946,48 @@ export async function dryRun(
 		result.notes.push(
 			'Faction switches are not kept in the session history, so there is nothing to replay; the rule fires live when a player moves from one faction to another.'
 		);
+		return result;
+	}
+	if (kind === 'kill_race') {
+		const c = cfg as KillRaceConfig;
+		const killRows = await env.db.execute<{
+			match: number | null;
+			faction: string | null;
+			teamKill: boolean;
+			headshot: boolean;
+			ts: Date;
+		}>(sql`
+			SELECT match_row AS match, killer_faction AS faction, team_kill AS "teamKill", headshot, ts
+			  FROM kills
+			 WHERE server_id = ${server.id} AND ts >= ${from} AND killer_steam_id IS NOT NULL
+			   AND NOT suicide AND match_row IS NOT NULL
+			 ORDER BY ts ASC LIMIT ${KILL_RACE_REPLAY_MAX}`);
+		const counts = new Map<number, Map<string, number>>();
+		const done = new Set<number>();
+		for (const k of killRows) {
+			if (k.match === null || !k.faction || done.has(k.match)) continue;
+			const sides = counts.get(k.match) ?? new Map<string, number>();
+			counts.set(k.match, sides);
+			// a team kill counts against, when the rule says; otherwise a kill counts (a headshot,
+			// when only those do)
+			let delta = 0;
+			if (k.teamKill) delta = c.teamKillsSubtract ? -1 : 0;
+			else if (!c.headshotsOnly || k.headshot) delta = 1;
+			if (!delta) continue;
+			const n = Math.max(0, (sides.get(k.faction) ?? 0) + delta);
+			sides.set(k.faction, n);
+			if (n >= c.target) {
+				done.add(k.match);
+				push(new Date(k.ts), `${k.faction} reaches ${c.target} kills: the match is ended`);
+			}
+		}
+		result.notes.push(
+			`Replayed the kills the feed stored for ${counts.size} match${counts.size === 1 ? '' : 'es'} in the last 24 hours. A time limit is not replayed; a match the game ended first is told by its kills as they stood.`
+		);
+		if (killRows.length === KILL_RACE_REPLAY_MAX)
+			result.notes.push(
+				`Only the first ${KILL_RACE_REPLAY_MAX} kills of the window were replayed.`
+			);
 		return result;
 	}
 	if (kind === 'infection') {

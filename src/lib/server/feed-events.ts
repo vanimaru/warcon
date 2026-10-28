@@ -2,8 +2,8 @@
 // event bus (the SSE route fans them to browsers; in the split roles every web process gets them
 // through the relay stream), and the team-kill rules get their turn. Their intents go through
 // the same outbox as every other trigger, so delivery, audit and the Discord mirror are shared.
-// The Kill rate, Kill distance, Name change, Bounty and Infection rules see every batch; the rest of
-// the work is for batches with team kills.
+// The Kill rate, Kill distance, Name change, Bounty, Infection and Kill race rules see every batch;
+// the rest of the work is for batches with team kills.
 import { and, eq, gte, inArray, isNull, lte, sql } from 'drizzle-orm';
 import type { Env } from './env';
 import { emit } from './events';
@@ -13,6 +13,7 @@ import {
 	bountyLapse,
 	enabledTriggers,
 	pushInfection,
+	pushRace,
 	type InfectionSay,
 	killDistanceAct,
 	renderTemplate,
@@ -89,6 +90,16 @@ import {
 	type InfectionConfig,
 	type InfectionPlayer
 } from './infection';
+import {
+	keepRaces,
+	killRaceSettingsKey,
+	raceMemory,
+	raceStep,
+	syncRaceClock,
+	tally,
+	type KillerLine,
+	type KillRaceConfig
+} from './kill-race';
 import { isDemoServer } from './env';
 import { drainMockFeed } from './mockgame';
 import { ingestBatch } from './feed';
@@ -140,6 +151,12 @@ export async function onKillsIngested(
 	} catch (err) {
 		if (!(err instanceof LostOwnership))
 			console.warn(`[warcon] infection rules on ${serverId}:`, publicMessage(err));
+	}
+	try {
+		await actOnKillRace(env, serverId, kills, vars);
+	} catch (err) {
+		if (!(err instanceof LostOwnership))
+			console.warn(`[warcon] kill race rules on ${serverId}:`, publicMessage(err));
 	}
 	const teamKills = kills.filter((k) => k.teamKill && k.killer);
 	if (!teamKills.length) return;
@@ -880,6 +897,82 @@ async function actOnInfection(
 				? 'Round over: everyone is infected'
 				: `${last.victim.name || last.victim.steamId} infected by ${last.killer.name || last.killer.steamId}`
 		});
+		let queued = 0;
+		await withOwnedTransaction(env, async (tx) => {
+			queued = await enqueueIntents(tx, serverId, out.intents);
+			await applyTriggerUpdates(tx, out.updates);
+		});
+		if (queued) wakeDelivery();
+	}
+}
+
+/**
+ * Each killer's kills in a match, from what the feed stored for it: kills of the other side, of
+ * them headshots, and team kills. Suicides and the environment count for nobody. Read from the
+ * match's own rows (kills.match_row, stamped at receipt), within the match's time so the server's
+ * kill index is used.
+ */
+async function killerLines(env: Env, serverId: string, matchRow: number): Promise<KillerLine[]> {
+	const rows = await env.db.execute<{
+		steamId: string;
+		name: string | null;
+		faction: string | null;
+		kills: number;
+		headshots: number;
+		teamKills: number;
+	}>(sql`
+		SELECT k.killer_steam_id AS "steamId", MAX(k.killer_name) AS name, k.killer_faction AS faction,
+		       COUNT(*) FILTER (WHERE NOT k.team_kill)::int AS kills,
+		       COUNT(*) FILTER (WHERE NOT k.team_kill AND k.headshot)::int AS headshots,
+		       COUNT(*) FILTER (WHERE k.team_kill)::int AS "teamKills"
+		  FROM kills k JOIN matches m ON m.id = ${matchRow} AND m.server_id = ${serverId}
+		 WHERE k.server_id = ${serverId} AND k.match_row = ${matchRow}
+		   AND k.ts >= m.started_at - interval '5 minutes'
+		   AND k.killer_steam_id IS NOT NULL AND NOT k.suicide
+		 GROUP BY k.killer_steam_id, k.killer_faction`);
+	return rows.map((r) => ({
+		steamId: r.steamId,
+		name: r.name ?? r.steamId,
+		faction: r.faction,
+		kills: Number(r.kills),
+		headshots: Number(r.headshots),
+		teamKills: Number(r.teamKills)
+	}));
+}
+
+/**
+ * The Kill race rule's count (kill-race.ts): after each batch, every side's kills in the match are
+ * read again, so a restart counts the same; the standings are announced as the leader passes each
+ * step, and a side that reaches the target wins and the match is ended. A batch with no match open
+ * (a server's first seconds) is passed over.
+ */
+async function actOnKillRace(
+	env: Env,
+	serverId: string,
+	batch: KillView[],
+	vars: KillerVars
+): Promise<void> {
+	const rows = (await enabledTriggers(env, serverId)).filter((r) => r.kind === 'kill_race');
+	keepRaces(serverId, new Set(rows.map((r) => r.id)));
+	if (!rows.length) return;
+	const matchRow = await stampedMatch(env, serverId, batch);
+	if (matchRow === null) return;
+	const lines = await killerLines(env, serverId, matchRow);
+	const factions = (memoryOf(serverId)?.status?.scores ?? []).map((f) => f.name);
+	const latest = [...batch].sort((a, b) => a.eventTime - b.eventTime).at(-1)!;
+	const now = Date.now();
+	const match = `m${matchRow}`;
+	for (const row of rows) {
+		const cfg = row.config as KillRaceConfig;
+		const { mem, fresh } = raceMemory(serverId, row.id, killRaceSettingsKey(cfg), match, now, true);
+		// the game's match clock says when the match began
+		syncRaceClock(mem, Date.parse(latest.ts), latest.eventTime);
+		const news = raceStep(cfg, mem, tally(cfg, lines, factions), fresh);
+		if (!news.length) continue;
+		const out: Evaluation = { intents: [], updates: [] };
+		pushRace(out, row, cfg, mem.match, news, (text, own) =>
+			renderTemplate(text, keptVars(vars.bare(own)), MAX_CHAT)
+		);
 		let queued = 0;
 		await withOwnedTransaction(env, async (tx) => {
 			queued = await enqueueIntents(tx, serverId, out.intents);

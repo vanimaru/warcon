@@ -36,6 +36,15 @@ import { seedWorld, suspend, type World } from './world';
 const ROUTES = join(import.meta.dir, '..', 'routes');
 /** The kill feed's tag for the defibrillator, a Kill distance rule's usual weapon. */
 const DEFIB = 'Id.Item.Defibrillator.Standard';
+/** A Kill race rule that says nothing: it needs only Match control, to end the match. */
+const SILENT_RACE = {
+	target: 50,
+	startMessage: '',
+	progressMessage: '',
+	winMessage: '',
+	drawMessage: '',
+	timeLeftMessage: ''
+};
 /** An Infection rule that says nothing: it needs only Move. */
 const SILENT_INFECTION = {
 	infectedFaction: 'Manticore',
@@ -551,6 +560,7 @@ describe.skipIf(!hasTestDb)('access', () => {
 				['kill_distance', { causes: [DEFIB], action: 'ban', banScope: 'org' }, 'lists.ban'],
 				['two_teams', { closedFaction: 'Lonestar' }, 'players.move'],
 				['infection', SILENT_INFECTION, 'players.move'],
+				['kill_race', SILENT_RACE, 'match.control'],
 				['afk_protection', {}, 'players.kill'],
 				['afk_watch', {}, 'players.kick'],
 				['afk_watch', { action: 'alert' }, 'players.kick'],
@@ -1431,7 +1441,8 @@ describe.skipIf(!hasTestDb)('access', () => {
 				live_name: { base: 'Demo Clan #1' },
 				restart_skip: {},
 				weather_cycle: { lightings: ['DayClear', 'DayLateRain'] },
-				infection: SILENT_INFECTION
+				infection: SILENT_INFECTION,
+				kill_race: SILENT_RACE
 			};
 			const save = (kind: string, name: string, config: Record<string, unknown>) =>
 				api(w, 'owner', 'POST api/servers/[id]/triggers', {

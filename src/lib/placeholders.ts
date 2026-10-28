@@ -122,6 +122,14 @@ export const MESSAGE_RULES: Readonly<Partial<Record<TriggerKind, MessageRule>>> 
 		own: ['killer', 'team', 'patients', 'infected', 'survivors', 'winner', 'top', 'minutes'],
 		player: true,
 		kept: true
+	},
+	// said to the whole server: `{standings}` is every side's kills, `{winner}` the side that won and
+	// `{kills}` its count, `{top}` the player with the most kills, `{target}` the kills to win
+	kill_race: {
+		fields: ['startMessage', 'progressMessage', 'winMessage', 'drawMessage', 'timeLeftMessage'],
+		own: ['target', 'standings', 'winner', 'kills', 'top', 'minutes'],
+		player: false,
+		kept: true
 	}
 };
 
