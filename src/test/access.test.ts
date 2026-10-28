@@ -43,6 +43,7 @@ const SILENT_INFECTION = {
 	startMessage: '',
 	infectWhisper: '',
 	infectBroadcast: '',
+	fewLeftMessage: '',
 	lastSurvivorMessage: '',
 	allInfectedMessage: ''
 };

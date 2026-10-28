@@ -1,6 +1,7 @@
 // The Infection rule (kind `infection`): a game mode built from the kill feed and the move without the
 // kill. Each round starts with a few players on the infected side and everyone else on the survivors'
-// side. A survivor killed by an infected player joins the infected (moved as they lie dead, so they
+// side: one faction of the rule's choosing, or (the default) every faction but the infected's, so on a
+// full server of three factions only the first infected move at the start. A survivor killed by an infected player joins the infected (moved as they lie dead, so they
 // respawn on that side); the round is the infected's once nobody is left, and survivors last as long
 // as they can. A new match starts a new round.
 //
@@ -25,15 +26,25 @@ export const INFECTION_SETUP_WAIT_MS = 45_000;
 export const INFECTION_PICKED_SHARE = 0.75;
 /** Moves a look sends, as Team balance does: the game takes a few a second. */
 export const INFECTION_MAX_MOVES_PER_LOOK = 6;
-export const INFECTION_MAX_PATIENTS = 10;
+/** The most players a round starts infected, whatever the count or share says. */
+export const INFECTION_MAX_PATIENTS = 30;
+/** The survivor counts announced by default as a round goes (a full server starts near 90). */
+export const INFECTION_DEFAULT_MILESTONES = [25, 10, 5];
+const MAX_MILESTONES = 10;
 
 export interface InfectionConfig {
 	/** the faction the infected play on */
 	infectedFaction: string;
-	/** the faction the survivors play on; players on any other side are moved here at the start */
+	/** the faction the survivors play on, players on any other side moved here at the start; empty:
+	 *  every faction but the infected's, where survivors stay on the side they picked */
 	survivorFaction: string;
-	/** how many players start each round infected (picked at random) */
+	/** how many players at least start each round infected (picked at random) */
 	startInfected: number;
+	/** and one more for every this many players with a side (0: the count alone), so a full server
+	 *  starts with more than a quiet one */
+	perPlayers: number;
+	/** survivor counts announced once a round as the survivors fall to them (fewLeftMessage) */
+	milestones: number[];
 	/** a round starts only with at least this many on */
 	minPlayers: number;
 	/** broadcast when a round starts; `{patients}` names the first infected */
@@ -42,6 +53,8 @@ export interface InfectionConfig {
 	infectWhisper: string;
 	/** broadcast at every infection; `{name}` the newly infected, `{killer}` who infected them */
 	infectBroadcast: string;
+	/** broadcast as the survivors fall to each milestone; `{survivors}` says how many */
+	fewLeftMessage: string;
 	/** broadcast once a round when one survivor is left; `{name}` is them */
 	lastSurvivorMessage: string;
 	/** broadcast when nobody is left uninfected */
@@ -55,24 +68,41 @@ const FACTION = /^[A-Za-z0-9 _.'-]{1,40}$/;
 export function validateInfection(c: Record<string, unknown>): InfectionConfig {
 	const infectedFaction = str(c.infectedFaction, 41);
 	const survivorFaction = str(c.survivorFaction, 41);
-	for (const [what, f] of [
-		['infected', infectedFaction],
-		['survivors’', survivorFaction]
-	])
-		if (!FACTION.test(f))
-			throw new ApiError(400, `Pick the ${what} faction, as the game names it (Manticore, say).`);
+	if (!FACTION.test(infectedFaction))
+		throw new ApiError(400, 'Pick the infected faction, as the game names it (Manticore, say).');
+	if (survivorFaction && !FACTION.test(survivorFaction))
+		throw new ApiError(
+			400,
+			'Pick the survivors’ faction as the game names it, or leave it empty for every other faction.'
+		);
 	if (same(infectedFaction, survivorFaction))
 		throw new ApiError(400, 'The infected and the survivors need two different factions.');
+	const milestones: number[] = [];
+	const raw = Array.isArray(c.milestones)
+		? c.milestones
+		: c.milestones === undefined
+			? INFECTION_DEFAULT_MILESTONES
+			: [];
+	for (const v of raw) {
+		const n = int(v, 0, 0, 1000);
+		if (n >= 2 && !milestones.includes(n)) milestones.push(n);
+	}
+	if (milestones.length > MAX_MILESTONES)
+		throw new ApiError(400, `At most ${MAX_MILESTONES} survivor counts to announce.`);
+	milestones.sort((a, b) => b - a);
 	const text = (k: keyof typeof INFECTION_DEFAULTS) =>
 		c[k] === undefined ? INFECTION_DEFAULTS[k] : str(c[k], 256);
 	return {
 		infectedFaction,
 		survivorFaction,
 		startInfected: int(c.startInfected, 1, 1, INFECTION_MAX_PATIENTS),
+		perPlayers: int(c.perPlayers, 10, 0, 100),
+		milestones,
 		minPlayers: int(c.minPlayers, 6, 2, 1000),
 		startMessage: text('startMessage'),
 		infectWhisper: text('infectWhisper'),
 		infectBroadcast: text('infectBroadcast'),
+		fewLeftMessage: text('fewLeftMessage'),
 		lastSurvivorMessage: text('lastSurvivorMessage'),
 		allInfectedMessage: text('allInfectedMessage'),
 		endMatch: c.endMatch === true
@@ -117,6 +147,9 @@ export interface InfectionMemory {
 	/** the first look of a wait with enough players on; 0 while there are not */
 	waitingSince: number;
 	lastSurvivorTold: boolean;
+	/** the milestones announced this round, and those passed before the round could (a round that
+	 *  starts with 8 survivors announces no 10) */
+	milestonesTold: Set<number>;
 }
 
 export const newInfectionMemory = (key: string): InfectionMemory => ({
@@ -128,7 +161,8 @@ export const newInfectionMemory = (key: string): InfectionMemory => ({
 	placed: new Set(),
 	startedAt: 0,
 	waitingSince: 0,
-	lastSurvivorTold: false
+	lastSurvivorTold: false,
+	milestonesTold: new Set()
 });
 
 export interface InfectionPlayer {
@@ -149,6 +183,7 @@ export interface InfectionMove {
 
 export type InfectionNews =
 	| { kind: 'start'; patients: InfectionPlayer[] }
+	| { kind: 'few'; survivors: number }
 	| { kind: 'last'; survivor: InfectionPlayer }
 	| { kind: 'all' };
 
@@ -161,8 +196,22 @@ export interface InfectionLook {
 
 const nextRound = (mem: InfectionMemory, now: number) => Math.max(now, mem.round + 1);
 
-const desired = (cfg: InfectionConfig, role: InfectionRole) =>
-	role === 'infected' ? cfg.infectedFaction : cfg.survivorFaction;
+/** The sides survivors play on in a match with these factions. */
+export const survivorSides = (cfg: InfectionConfig, factions: string[]): string[] =>
+	cfg.survivorFaction
+		? [cfg.survivorFaction]
+		: factions.filter((f) => f && !same(f, cfg.infectedFaction));
+
+/** How many start a round infected among this many players with a side: never all of them. */
+export const patientCount = (cfg: InfectionConfig, picked: number): number =>
+	Math.max(
+		0,
+		Math.min(
+			INFECTION_MAX_PATIENTS,
+			picked - 1,
+			Math.max(cfg.startInfected, cfg.perPlayers ? Math.floor(picked / cfg.perPlayers) : 0)
+		)
+	);
 
 /** Picks `n` of `from` at random (rand in [0, 1)). */
 export function pickRandom<T>(from: T[], n: number, rand: () => number = Math.random): T[] {
@@ -200,12 +249,18 @@ export function infectionLook(
 		mem.placed.clear();
 		mem.waitingSince = 0;
 		mem.lastSurvivorTold = false;
+		mem.milestonesTold.clear();
 	}
 	const missing = [cfg.infectedFaction, cfg.survivorFaction].filter(
-		(f) => !factions.some((x) => same(x, f))
+		(f) => f && !factions.some((x) => same(x, f))
 	);
 	if (missing.length) {
 		out.result = `Waiting: this match has no ${missing.join(' or ')} faction`;
+		return out;
+	}
+	const sides = survivorSides(cfg, factions);
+	if (!sides.length) {
+		out.result = 'Waiting: this match has no faction for the survivors';
 		return out;
 	}
 	const picked = players.filter((p) => p.faction);
@@ -222,6 +277,7 @@ export function infectionLook(
 		mem.startedAt = 0;
 		mem.round = nextRound(mem, now);
 		mem.phase = [...mem.roles.values()].includes('infected') ? 'running' : 'waiting';
+		passMilestones(cfg, mem, roundCounts(mem, players).survivors);
 		if (mem.phase === 'running') out.result = roundLine(mem, players);
 	}
 
@@ -236,7 +292,7 @@ export function infectionLook(
 			picked.length >= players.length * INFECTION_PICKED_SHARE ||
 			now - mem.waitingSince >= INFECTION_SETUP_WAIT_MS;
 		if (!ready) return out;
-		const patients = pickRandom(picked, Math.min(cfg.startInfected, picked.length - 1), input.rand);
+		const patients = pickRandom(picked, patientCount(cfg, picked.length), input.rand);
 		mem.roles.clear();
 		mem.askedAt.clear();
 		mem.placed.clear();
@@ -247,12 +303,22 @@ export function infectionLook(
 		mem.startedAt = now;
 		mem.waitingSince = 0;
 		mem.lastSurvivorTold = false;
+		mem.milestonesTold.clear();
+		passMilestones(cfg, mem, picked.length - patients.length);
 		out.news.push({ kind: 'start', patients });
 		out.result = `Round started: ${patients.map((p) => p.name || p.steamId).join(', ')} infected`;
 	}
 
-	// running or over: keep everyone on their side
+	// running or over: keep everyone on their side. A survivor off the survivors' sides goes to the
+	// one with the fewest survivors, counted as the moves are decided.
 	const perLook = Math.max(1, input.perLook ?? INFECTION_MAX_MOVES_PER_LOOK);
+	const onSide = new Map(sides.map((f) => [f, 0]));
+	const sideOf = (faction: string | null) => sides.find((f) => same(f, faction));
+	for (const p of picked) {
+		const side = sideOf(p.faction);
+		if (side && mem.roles.get(p.steamId) === 'survivor') onSide.set(side, onSide.get(side)! + 1);
+	}
+	const lightest = () => [...onSide.entries()].reduce((a, b) => (b[1] < a[1] ? b : a))[0];
 	for (const p of picked) {
 		let role = mem.roles.get(p.steamId);
 		let late = false;
@@ -273,7 +339,7 @@ export function infectionLook(
 			role = 'infected';
 			mem.roles.set(p.steamId, role);
 		}
-		const to = desired(cfg, role);
+		const to = role === 'infected' ? cfg.infectedFaction : (sideOf(p.faction) ?? lightest());
 		if (same(p.faction, to)) {
 			mem.askedAt.delete(p.steamId);
 			mem.placed.add(p.steamId);
@@ -283,6 +349,7 @@ export function infectionLook(
 		if (asked !== undefined && now - asked < INFECTION_REASK_MS) continue;
 		if (out.moves.length >= perLook) continue;
 		mem.askedAt.set(p.steamId, now);
+		if (role === 'survivor') onSide.set(to, (onSide.get(to) ?? 0) + 1);
 		out.moves.push({
 			steamId: p.steamId,
 			name: p.name || p.steamId,
@@ -295,7 +362,7 @@ export function infectionLook(
 					: 'back'
 		});
 	}
-	out.news.push(...roundNews(mem, players));
+	out.news.push(...roundNews(cfg, mem, players));
 	if (!out.result && out.news.length) out.result = roundLine(mem, players);
 	return out;
 }
@@ -329,11 +396,21 @@ export function infectionKills(
 	return { infected };
 }
 
+/** Marks the milestones a round has already passed (or starts at) as told, so they never are. */
+function passMilestones(cfg: InfectionConfig, mem: InfectionMemory, survivors: number): void {
+	for (const n of cfg.milestones) if (n >= survivors) mem.milestonesTold.add(n);
+}
+
 /**
- * What the round has come to, said once each: one survivor left, or none (the round is over).
+ * What the round has come to, said once each: the survivors down to a milestone (only the lowest
+ * reached, when a burst of kills passes several), one survivor left, or none (the round is over).
  * Only players on the list count: a survivor who left is no survivor. Mutates `mem`.
  */
-export function roundNews(mem: InfectionMemory, players: InfectionPlayer[]): InfectionNews[] {
+export function roundNews(
+	cfg: InfectionConfig,
+	mem: InfectionMemory,
+	players: InfectionPlayer[]
+): InfectionNews[] {
 	if (mem.phase !== 'running') return [];
 	const on = players.filter((p) => mem.roles.has(p.steamId));
 	const infected = on.filter((p) => mem.roles.get(p.steamId) === 'infected');
@@ -343,11 +420,16 @@ export function roundNews(mem: InfectionMemory, players: InfectionPlayer[]): Inf
 		mem.phase = 'over';
 		return [{ kind: 'all' }];
 	}
-	if (survivors.length === 1 && !mem.lastSurvivorTold) {
+	if (survivors.length === 1) {
+		passMilestones(cfg, mem, 1);
+		if (mem.lastSurvivorTold) return [];
 		mem.lastSurvivorTold = true;
 		return [{ kind: 'last', survivor: survivors[0] }];
 	}
-	return [];
+	const reached = cfg.milestones.filter((n) => n >= survivors.length && !mem.milestonesTold.has(n));
+	if (!reached.length) return [];
+	for (const n of reached) mem.milestonesTold.add(n);
+	return [{ kind: 'few', survivors: survivors.length }];
 }
 
 /** How the round stands, for the rule's row and the placeholders. */

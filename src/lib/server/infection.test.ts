@@ -8,6 +8,7 @@ import {
 	infectionLook,
 	infectionSpeaks,
 	newInfectionMemory,
+	patientCount,
 	roundCounts,
 	roundNews,
 	validateInfection,
@@ -39,7 +40,7 @@ describe('Infection settings', () => {
 			validateInfection({ infectedFaction: 'Lonestar', survivorFaction: 'lonestar' })
 		).toThrow('two different factions');
 		expect(() => validateInfection({ infectedFaction: '', survivorFaction: 'Lonestar' })).toThrow();
-		expect(validateInfection({ ...cfg, startInfected: 99 }).startInfected).toBe(10);
+		expect(validateInfection({ ...cfg, startInfected: 99 }).startInfected).toBe(30);
 	});
 	test('a rule with every text blank says nothing, so it needs no Chat', () => {
 		expect(infectionSpeaks(cfg)).toBe(true);
@@ -50,6 +51,7 @@ describe('Infection settings', () => {
 					startMessage: '',
 					infectWhisper: '',
 					infectBroadcast: '',
+					fewLeftMessage: '',
 					lastSurvivorMessage: '',
 					allInfectedMessage: ''
 				})
@@ -189,18 +191,18 @@ describe('a round', () => {
 			[{ eventId: 'x', killer: players[0], victim: players[2], suicide: false }],
 			1
 		);
-		expect(roundNews(mem, players)).toEqual([{ kind: 'last', survivor: players[3] }]);
-		expect(roundNews(mem, players)).toEqual([]);
+		expect(roundNews(cfg, mem, players)).toEqual([{ kind: 'last', survivor: players[3] }]);
+		expect(roundNews(cfg, mem, players)).toEqual([]);
 		infectionKills(
 			cfg,
 			mem,
 			[{ eventId: 'y', killer: players[1], victim: players[3], suicide: false }],
 			2
 		);
-		expect(roundNews(mem, players)).toEqual([{ kind: 'all' }]);
+		expect(roundNews(cfg, mem, players)).toEqual([{ kind: 'all' }]);
 		expect(mem.phase).toBe('over');
 		// over: no more infections, no more news, until the match ends
-		expect(roundNews(mem, players)).toEqual([]);
+		expect(roundNews(cfg, mem, players)).toEqual([]);
 	});
 
 	test('a player who switches is put back; a survivor who joins the infected stays infected', () => {
@@ -303,5 +305,110 @@ describe('a round', () => {
 		expect(new Set([...look.moves, ...next.moves].map((m) => m.steamId)).size).toBe(
 			2 * INFECTION_MAX_MOVES_PER_LOOK
 		);
+	});
+});
+
+describe('a full server of 100', () => {
+	const open = validateInfection({ infectedFaction: 'Manticore', minPlayers: 10 });
+	const full = (n: number, faction: (i: number) => string) =>
+		Array.from({ length: n }, (_, i) => p(i, faction(i)));
+
+	test('a new rule leaves the survivors on either other side, one infected in ten', () => {
+		expect(open.survivorFaction).toBe('');
+		expect(open.perPlayers).toBe(10);
+		expect(patientCount(open, 100)).toBe(10);
+		expect(patientCount(open, 15)).toBe(1);
+		expect(patientCount(validateInfection({ ...open, perPlayers: 2 }), 100)).toBe(30);
+		expect(patientCount(validateInfection({ ...open, startInfected: 5, perPlayers: 0 }), 3)).toBe(
+			2
+		);
+	});
+
+	test('only the first infected move at the start; the rest keep the side they picked', () => {
+		const mem = newInfectionMemory('k');
+		// a new match after a round the infection won: everyone on Manticore but a few
+		const players = full(100, (i) => (i < 50 ? 'Valkyra' : 'Lonestar'));
+		let rand = 0.99;
+		const look = infectionLook(open, mem, {
+			players,
+			factions: FACTIONS,
+			matchEnded: true,
+			now: 0,
+			perLook: 100,
+			rand: () => (rand = (rand * 7.3) % 1)
+		});
+		const start = look.news[0];
+		expect(start.kind).toBe('start');
+		expect(start.kind === 'start' && start.patients.length).toBe(10);
+		expect(look.moves.length).toBe(10);
+		expect(look.moves.every((m) => m.to === 'Manticore')).toBe(true);
+		expect(roundCounts(mem, players)).toEqual({ infected: 10, survivors: 90 });
+	});
+
+	test('survivors left on the infected side go to the side with the fewest survivors', () => {
+		const mem = newInfectionMemory('k');
+		const players = [
+			...full(6, () => 'Valkyra'),
+			...full(2, () => 'Lonestar').map((q, i) => ({ ...q, steamId: `x${i}` })),
+			...full(4, () => 'Manticore').map((q, i) => ({ ...q, steamId: `z${i}` }))
+		];
+		const look = infectionLook(open, mem, {
+			players,
+			factions: FACTIONS,
+			matchEnded: true,
+			now: 0,
+			perLook: 100,
+			rand: first
+		});
+		// the four on Manticore are survivors now (the patient is the first Valkyra player)
+		const back = look.moves.filter((m) => m.to !== 'Manticore');
+		expect(back.map((m) => m.to)).toEqual(['Lonestar', 'Lonestar', 'Lonestar', 'Valkyra']);
+	});
+
+	test('the survivors left are announced at each count once, the lowest when a burst passes several', () => {
+		const mem = newInfectionMemory('k');
+		const players = full(40, (i) => (i < 30 ? 'Valkyra' : 'Manticore'));
+		infectionLook(open, mem, { players, factions: FACTIONS, matchEnded: false, now: 0 });
+		const infect = (n: number) => {
+			const victims = players.filter((q) => mem.roles.get(q.steamId) === 'survivor').slice(0, n);
+			infectionKills(
+				open,
+				mem,
+				victims.map((v, i) => ({
+					eventId: `${v.steamId}${i}`,
+					killer: players[39],
+					victim: v,
+					suicide: false
+				})),
+				1
+			);
+		};
+		infect(4); // 26 left
+		expect(roundNews(open, mem, players)).toEqual([]);
+		infect(1); // 25
+		expect(roundNews(open, mem, players)).toEqual([{ kind: 'few', survivors: 25 }]);
+		expect(roundNews(open, mem, players)).toEqual([]);
+		infect(19); // 6: past 10, said with the count as it is
+		expect(roundNews(open, mem, players)).toEqual([{ kind: 'few', survivors: 6 }]);
+		infect(3); // 3: past 5
+		expect(roundNews(open, mem, players)).toEqual([{ kind: 'few', survivors: 3 }]);
+		infect(2);
+		expect(roundNews(open, mem, players)).toMatchObject([{ kind: 'last' }]);
+	});
+
+	test('a round that starts below a count never announces it', () => {
+		const mem = newInfectionMemory('k');
+		// 12 on: one infected, 11 survivors, below 25 already
+		const players = full(12, () => 'Valkyra');
+		infectionLook(open, mem, {
+			players,
+			factions: FACTIONS,
+			matchEnded: false,
+			now: 0,
+			rand: first
+		});
+		expect(mem.milestonesTold.has(25)).toBe(true);
+		expect(mem.milestonesTold.has(10)).toBe(false);
+		expect(mem.milestonesTold.has(5)).toBe(false);
 	});
 });

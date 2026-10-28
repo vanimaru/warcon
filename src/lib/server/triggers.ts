@@ -1913,6 +1913,13 @@ export function pushInfection(
 				{ stage: 'start', patients },
 				'start'
 			);
+		} else if (n.kind === 'few') {
+			broadcast(
+				cfg.fewLeftMessage && say(cfg.fewLeftMessage, null, own()),
+				`${n.survivors} survivors left`,
+				{ stage: 'few', survivors: n.survivors },
+				`few:${n.survivors}`
+			);
 		} else if (n.kind === 'last') {
 			const name = n.survivor.name || n.survivor.steamId;
 			broadcast(

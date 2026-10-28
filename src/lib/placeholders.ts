@@ -112,6 +112,7 @@ export const MESSAGE_RULES: Readonly<Partial<Record<TriggerKind, MessageRule>>> 
 			'startMessage',
 			'infectWhisper',
 			'infectBroadcast',
+			'fewLeftMessage',
 			'lastSurvivorMessage',
 			'allInfectedMessage'
 		],

@@ -843,7 +843,7 @@ async function actOnInfection(
 			now
 		);
 		if (!infected.length) continue;
-		const news = roundNews(mem, players);
+		const news = roundNews(cfg, mem, players);
 		const stats = await vars.stats(
 			[
 				...infected.flatMap((i) => [

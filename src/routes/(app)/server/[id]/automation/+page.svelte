@@ -556,9 +556,13 @@
 		infectedFaction: string;
 		survivorFaction: string;
 		startInfected: number;
+		perPlayers: number;
+		/** survivor counts to announce, comma-separated */
+		milestones: string;
 		startMessage: string;
 		infectWhisper: string;
 		infectBroadcast: string;
+		fewLeftMessage: string;
 		lastSurvivorMessage: string;
 		allInfectedMessage: string;
 		endMatch: boolean;
@@ -568,6 +572,7 @@
 		['startMessage', 'When a round starts'],
 		['infectWhisper', 'Whisper to the newly infected'],
 		['infectBroadcast', 'Broadcast at every infection'],
+		['fewLeftMessage', 'As the survivors fall to each count below'],
 		['lastSurvivorMessage', 'When one survivor is left'],
 		['allInfectedMessage', 'When everyone is infected']
 	] as const;
@@ -843,11 +848,17 @@
 			lightOn: Array.isArray(c.lightings) ? [...(c.lightings as string[])] : weatherPicks(),
 			random: b('random', false),
 			infectedFaction: s('infectedFaction', 'Manticore'),
-			survivorFaction: s('survivorFaction', 'Lonestar'),
+			// a new rule's survivors keep the side they picked, on either other faction
+			survivorFaction: s('survivorFaction', ''),
 			startInfected: n('startInfected', 1),
+			perPlayers: n('perPlayers', 10),
+			milestones: Array.isArray(c.milestones)
+				? (c.milestones as number[]).join(', ')
+				: '25, 10, 5',
 			startMessage: s('startMessage', INFECTION_DEFAULTS.startMessage),
 			infectWhisper: s('infectWhisper', INFECTION_DEFAULTS.infectWhisper),
 			infectBroadcast: s('infectBroadcast', INFECTION_DEFAULTS.infectBroadcast),
+			fewLeftMessage: s('fewLeftMessage', INFECTION_DEFAULTS.fewLeftMessage),
 			lastSurvivorMessage: s('lastSurvivorMessage', INFECTION_DEFAULTS.lastSurvivorMessage),
 			allInfectedMessage: s('allInfectedMessage', INFECTION_DEFAULTS.allInfectedMessage),
 			endMatch: b('endMatch', false)
@@ -1056,10 +1067,16 @@
 					infectedFaction: f.infectedFaction.trim(),
 					survivorFaction: f.survivorFaction.trim(),
 					startInfected: Number(f.startInfected),
+					perPlayers: Number(f.perPlayers) || 0,
+					milestones: f.milestones
+						.split(/[\s,]+/)
+						.filter(Boolean)
+						.map(Number),
 					minPlayers: Number(f.minPlayers),
 					startMessage: f.startMessage,
 					infectWhisper: f.infectWhisper,
 					infectBroadcast: f.infectBroadcast,
+					fewLeftMessage: f.fewLeftMessage,
 					lastSurvivorMessage: f.lastSurvivorMessage,
 					allInfectedMessage: f.allInfectedMessage,
 					endMatch: f.endMatch
@@ -1306,9 +1323,10 @@
 			}
 			case 'infection': {
 				const n = Number(c.startInfected) || 1;
+				const per = Number(c.perPlayers) || 0;
 				return [
-					`${c.infectedFaction} infect ${c.survivorFaction}`,
-					`${n} infected at the start, with ${c.minPlayers}+ on`,
+					`${c.infectedFaction} infect ${c.survivorFaction || 'every other faction'}`,
+					`${per ? `1 in ${per} (at least ${n})` : n} infected at the start, with ${c.minPlayers}+ on`,
 					c.endMatch ? 'ends the match once all are infected' : ''
 				]
 					.filter(Boolean)
@@ -2085,14 +2103,16 @@
 								bind:value={f.survivorFaction}
 								maxlength="40"
 								aria-label="The survivors' faction"
-								required
+								placeholder="Every other faction"
 							/>
 						</div>
 						<datalist id="infection-factions">
 							{#each FACTIONS as x (x)}<option value={x}></option>{/each}
 						</datalist>
 						<p class="text-[12px] text-mist-600">
-							At each round's start, players on any other faction are moved to the survivors.
+							Empty: survivors keep the side they picked on every faction but the infected's, so
+							on a full server only the first infected move at the start. A faction named: everyone
+							else is moved onto it.
 						</p>
 					</fieldset>
 					<fieldset class="space-y-2">
@@ -2108,7 +2128,16 @@
 								aria-label="Players infected at the start"
 								required
 							/>
-							infected, picked at random, once at least
+							infected, and one more for every
+							<input
+								class="input w-20 text-right"
+								type="number"
+								min="0"
+								max="100"
+								bind:value={f.perPlayers}
+								aria-label="One infected for every this many players (0 for none)"
+							/>
+							players (0: the count alone), picked at random, once at least
 							<input
 								class="input w-20 text-right"
 								type="number"
@@ -2127,6 +2156,16 @@
 						{#if !canMatch}
 							<p class="text-[12px] text-mist-600">Ending the match needs Match control.</p>
 						{/if}
+						<label class="block space-y-1 text-[13px]"
+							><span class="text-mist-400">Announce the survivors left at</span>
+							<input
+								class="input w-48"
+								type="text"
+								data-plain
+								bind:value={f.milestones}
+								placeholder="25, 10, 5"
+							/></label
+						>
 					</fieldset>
 					<fieldset class="space-y-3">
 						<legend class="field-label">Messages (each optional)</legend>
