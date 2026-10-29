@@ -247,6 +247,7 @@ import {
 	type InfectionNews,
 	type InfectionPlayer
 } from './infection';
+import { unlockNote, type UnlockMemory } from './team-unlock-core';
 import {
 	keepRaces,
 	killRaceSettingsKey,
@@ -442,6 +443,14 @@ function ruleEndsMatch(kind: TriggerKind, config: unknown): [Capability, string]
 	return null;
 }
 
+/** A fourth: an Infection rule that switches the game's team lock off (and back) in the config
+ *  document (team-unlock.ts). */
+function ruleWritesConfig(kind: TriggerKind, config: unknown): [Capability, string] | null {
+	if (kind === 'infection' && (config as Partial<InfectionConfig> | null)?.unlockTeams === true)
+		return ['config.apply', "switches the game's team lock off in the config document"];
+	return null;
+}
+
 export function requireRuleCaps(
 	kind: TriggerKind,
 	config: unknown,
@@ -451,7 +460,8 @@ export function requireRuleCaps(
 	for (const need of [
 		ruleNeeds(kind, config),
 		ruleAlsoNeeds(kind, config),
-		ruleEndsMatch(kind, config)
+		ruleEndsMatch(kind, config),
+		ruleWritesConfig(kind, config)
 	]) {
 		if (!need || access.caps.has(need[0])) continue;
 		const [cap, does] = need;
@@ -593,9 +603,13 @@ export async function updateTrigger(
 
 /**
  * Kinds whose deletion acts on the server: a Live server name rule's own name is written back to the
- * config document, so deleting one needs what switching it off does.
+ * config document, and so is the team lock an Infection rule switched off, so deleting one needs
+ * what switching it off does.
  */
-const ACTS_WHEN_DELETED: TriggerKind[] = ['live_name'];
+const actsWhenDeleted = (row: TriggerRow): boolean =>
+	row.kind === 'live_name' ||
+	(row.kind === 'infection' &&
+		(row.config as Partial<InfectionConfig> | null)?.unlockTeams === true);
 
 export async function deleteTrigger(
 	env: Env,
@@ -606,7 +620,7 @@ export async function deleteTrigger(
 	id: string
 ): Promise<void> {
 	const row = await triggerOf(env, server.id, id);
-	if (ACTS_WHEN_DELETED.includes(row.kind)) requireRuleCaps(row.kind, row.config, server, access);
+	if (actsWhenDeleted(row)) requireRuleCaps(row.kind, row.config, server, access);
 	await env.db.delete(triggers).where(eq(triggers.id, row.id));
 	if (SETTINGS_KEYS[row.kind])
 		await dropQueued(env, row.id, 'The rule was deleted before this was sent.');
@@ -704,6 +718,8 @@ export interface TickContext {
 	restartTimeUtc?: string | null;
 	/** the game's lock on overpopulated teams, from the config document; null or absent until read */
 	teamLock?: TeamLock | null;
+	/** an Infection rule's hold on that lock, as the worker keeps it (team-unlock.ts) */
+	teamUnlock?: UnlockMemory | null;
 	/** the match that ended between the previous look and this one, or null */
 	matchEnd: MatchEnd | null;
 	/** the first look after the server was out of reach: what happened meanwhile is unknown (a match
@@ -1819,8 +1835,10 @@ async function evalInfection(
 		);
 	pushInfection(out, row, cfg, mem, players, { moves: look.moves, news: look.news }, say, now);
 	// The game's own lock on a side too far ahead fights the infection, whose side grows with every
-	// kill: while the config document has it on, the row says so beside how the round stands.
-	const lock = ctx.teamLock?.on ? infectionLockNote(ctx.teamLock.threshold) : '';
+	// kill: the row says beside how the round stands whether it is on, being switched off by the rule
+	// (Unlock teams), or switched off and waiting for the next match. A match end is that next match.
+	if (ctx.matchEnd && ctx.teamUnlock) ctx.teamUnlock.pending = false;
+	const lock = unlockNote(cfg.unlockTeams, ctx.teamLock, ctx.teamUnlock ?? null);
 	const base = look.result ?? row.lastResult.split(INFECTION_LOCK_MARK)[0];
 	const line = base && lock ? `${base}${INFECTION_LOCK_MARK}${lock}` : base || lock;
 	if (line && line !== row.lastResult) {
@@ -1834,8 +1852,6 @@ async function evalInfection(
 }
 
 const INFECTION_LOCK_MARK = ' · ';
-const infectionLockNote = (threshold: number) =>
-	`Warning: the game locks a team ${threshold} ahead (Lock overpopulated teams), so moves onto the infected side can be refused: switch it off on the Config tab`;
 
 /**
  * A Kill race rule at one look (kill-race.ts): as a match ends, the race as its kills stood (when

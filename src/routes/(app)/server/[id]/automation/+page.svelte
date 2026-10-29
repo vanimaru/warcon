@@ -575,6 +575,8 @@
 		survivorsWinMessage: string;
 		infectedWinMessage: string;
 		endMatch: boolean;
+		/** an Infection rule switches the game's team lock off while it is on, and back after */
+		unlockTeams: boolean;
 		/** an Infection rule's time limit (0: none), the minutes left it announces, and the text */
 		timeLimitMinutes: number;
 		timeWarnings: string;
@@ -902,6 +904,8 @@
 			survivorsWinMessage: s('survivorsWinMessage', INFECTION_DEFAULTS.survivorsWinMessage),
 			infectedWinMessage: s('infectedWinMessage', INFECTION_DEFAULTS.infectedWinMessage),
 			endMatch: b('endMatch', false),
+			// a new rule switches the team lock off when its maker may write the config document
+			unlockTeams: b('unlockTeams', !t && kind === 'infection' && canConfig),
 			// a new rule plays to a 20-minute limit; an older one keeps none until it is given one
 			timeLimitMinutes: n('timeLimitMinutes', t || kind !== 'infection' ? 0 : 20),
 			timeWarnings: Array.isArray(c.timeWarnings)
@@ -1162,7 +1166,8 @@
 						.split(/[\s,]+/)
 						.filter(Boolean)
 						.map(Number),
-					timeLeftMessage: f.timeLeftMessage
+					timeLeftMessage: f.timeLeftMessage,
+					unlockTeams: f.unlockTeams
 				};
 			case 'weather_cycle':
 				return {
@@ -1422,7 +1427,8 @@
 					Number(c.timeLimitMinutes) > 0
 						? `${c.timeLimitMinutes} min limit, survivors win when it runs out`
 						: '',
-					c.endMatch ? 'ends the match once all are infected' : ''
+					c.endMatch ? 'ends the match once all are infected' : '',
+					c.unlockTeams ? 'team lock off while on' : ''
 				]
 					.filter(Boolean)
 					.join(' · ');
@@ -2284,6 +2290,17 @@
 								Ending the match, at a time limit or once everyone is infected, needs Match control.
 							</p>
 						{/if}
+						<label class="flex items-center gap-2 text-[13px]"
+							><input type="checkbox" bind:checked={f.unlockTeams} disabled={!canConfig} /> Unlock
+							teams: switch the game's Lock overpopulated teams off while this rule is on, and put
+							back what was set once it is off (the game reads it from the next match)</label
+						>
+						{#if !canConfig}
+							<p class="text-[12px] text-mist-600">
+								Switching the team lock needs Config &amp; settings. Without it, switch Lock
+								overpopulated teams off on the Config tab yourself.
+							</p>
+						{/if}
 						<label class="block space-y-1 text-[13px]"
 							><span class="text-mist-400">Announce the survivors left at</span>
 							<input
@@ -2339,7 +2356,9 @@
 						new match starts a new round. Needs the kill feed. While a Team balance rule
 						is on, the rule waits. The game's Lock overpopulated teams (on by default: a
 						side two ahead takes no more players) can refuse the moves onto the growing
-						infected side: switch it off on the Config tab; the rule's row warns while
+						infected side: Unlock teams switches it off while the rule is on and puts
+						back what was set once it is off (from the next match, as the game reads
+						it); without it, switch it off on the Config tab: the rule's row warns while
 						it is on. Moves are under Recent actions and in the audit trail; Discord
 						hears only of the ones that fail. One rule per server.
 					</p>

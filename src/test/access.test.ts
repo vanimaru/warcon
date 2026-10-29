@@ -1460,7 +1460,7 @@ describe.skipIf(!hasTestDb)('access', () => {
 				expect((await save('welcome', name, { message: 'Hi' })).status).toBe(201);
 		});
 
-		test('an Infection rule that speaks needs Chat, and one that ends the match Match control', async () => {
+		test('an Infection rule that speaks needs Chat, one that ends the match Match control, and one that unlocks the teams Config', async () => {
 			const w = await seedWorld(env);
 			const params = { id: w.server.id };
 			const holds = (caps: string[]) =>
@@ -1488,6 +1488,12 @@ describe.skipIf(!hasTestDb)('access', () => {
 			const ended = await save(ends);
 			// past the check: one rule per server, and the server has one now
 			expect(ended.status).toBe(409);
+			// switching the game's team lock off writes the config document
+			const unlocks = { ...SILENT_INFECTION, unlockTeams: true };
+			await holds([]);
+			expect((await save(unlocks)).status).toBe(403);
+			await holds(['config.apply']);
+			expect((await save(unlocks)).status).toBe(409);
 		});
 
 		test('a Team balance rule that whispers needs Chat as well', async () => {

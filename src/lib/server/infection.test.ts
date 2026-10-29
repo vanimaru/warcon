@@ -5,6 +5,7 @@ import {
 	INFECTION_REASK_MS,
 	INFECTION_SETUP_WAIT_MS,
 	infectionKills,
+	infectionSettingsKey,
 	infectionLook,
 	infectionSpeaks,
 	newInfectionMemory,
@@ -586,5 +587,15 @@ describe('a time limit', () => {
 		// once: a later kill does not move it
 		syncRoundClock(mem, 101 * min, 2);
 		expect(timeLeft(timed, mem, 100 * min)).toBe(8 * min);
+	});
+});
+
+describe('Unlock teams', () => {
+	test('off unless ticked, and outside the settings key: ticking it starts nothing over', () => {
+		expect(cfg.unlockTeams).toBe(false);
+		const ticked = validateInfection({ ...cfg, unlockTeams: true });
+		expect(ticked.unlockTeams).toBe(true);
+		expect(infectionSettingsKey(ticked)).toBe(infectionSettingsKey(cfg));
+		expect(infectionSettingsKey({ ...cfg, minPlayers: 9 })).not.toBe(infectionSettingsKey(cfg));
 	});
 });

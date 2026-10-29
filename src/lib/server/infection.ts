@@ -88,6 +88,9 @@ export interface InfectionConfig {
 	timeWarnings: number[];
 	/** broadcast as the time left falls to each warning; `{minutes}` says how many */
 	timeLeftMessage: string;
+	/** switch the game's Lock overpopulated teams off while the rule is on, and put back what was
+	 *  there once it is off (team-unlock.ts; needs Config & settings) */
+	unlockTeams: boolean;
 }
 
 const FACTION = /^[A-Za-z0-9 _.'-]{1,40}$/;
@@ -151,12 +154,19 @@ export function validateInfection(c: Record<string, unknown>): InfectionConfig {
 		endMatch: c.endMatch === true,
 		timeLimitMinutes,
 		timeWarnings,
-		timeLeftMessage: text('timeLeftMessage')
+		timeLeftMessage: text('timeLeftMessage'),
+		unlockTeams: c.unlockTeams === true
 	};
 }
 
-/** The fingerprint a rule's rows carry: a move decided under other settings is not sent. */
-export const infectionSettingsKey = (cfg: InfectionConfig): string => settingsFingerprint(cfg);
+/**
+ * The fingerprint a rule's rows carry: a move decided under other settings is not sent. Unlock
+ * teams is left out: ticking it neither starts the round over nor stops what it queued.
+ */
+export const infectionSettingsKey = (cfg: InfectionConfig): string => {
+	const { unlockTeams: _unlock, ...rest } = cfg;
+	return settingsFingerprint(rest);
+};
 
 /** Whether the rule says anything to players (and so needs Chat). */
 export const infectionSpeaks = (cfg: Partial<InfectionConfig> | null | undefined): boolean =>
