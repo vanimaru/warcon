@@ -383,7 +383,7 @@
 				? '{name} of {faction}: {streak} kills, the most on their side.'
 				: pick === 'manual'
 					? '{name} of {faction}.'
-					: '{name}: {streak} kills without dying.'
+					: '{name} of {faction}: {streak} kills without dying.'
 		const ask = pick === 'streak' ? 'Who ends the run?' : 'Who takes them down?';
 		const claim =
 			pick === 'streak' ? "{name} ended {target}'s run of {streak}" : '{name} took down {target}';
@@ -602,6 +602,8 @@
 		wanted: { steamId: string; name: string }[];
 		wantedInput: string;
 		setMessage: string;
+		/** a Bounty rule's whisper to the player it marks */
+		markedWhisper: string;
 		claimMessage: string;
 		whisper: string;
 		/** a Rotation shuffle rule's map ids, in the order they take turns */
@@ -954,6 +956,11 @@
 			setMessage: s('setMessage', bountyTexts(bountyReward, bountyPick).setMessage),
 			claimMessage: s('claimMessage', bountyTexts(bountyReward, bountyPick).claimMessage),
 			whisper: s('whisper', bountyTexts(bountyReward, bountyPick).whisper),
+			// a new rule tells the player it marks; one saved before the whisper existed stays silent
+			markedWhisper: s(
+				'markedWhisper',
+				t ? '' : 'You have a bounty on you: every enemy is hunting you. Stay alive!'
+			),
 			mapOrder: mapTurn(c.maps),
 			// a new rule starts from the name the server shows now
 			liveBase: s('base', liveStatus?.serverName ?? ''),
@@ -1201,7 +1208,8 @@
 					scope: f.slotScope,
 					setMessage: f.setMessage,
 					claimMessage: f.claimMessage,
-					whisper: f.whisper
+					whisper: f.whisper,
+					markedWhisper: f.markedWhisper
 				};
 			case 'rotation_shuffle':
 				return { maps: f.mapOrder };
@@ -4006,6 +4014,20 @@
 						/>
 					</fieldset>
 					<fieldset class="space-y-2">
+						<legend class="field-label">Whisper the marked player, blank for none</legend>
+						<input
+							class="input"
+							type="text"
+							bind:value={f.markedWhisper}
+							maxlength={MAX_CHAT}
+							aria-label="Whisper the marked player"
+						/>
+						<p class="text-[12px] text-mist-600">
+							Only they see it, as the bounty is set: the announcement goes to everyone, and in a
+							busy chat they may not see it is them.
+						</p>
+					</fieldset>
+					<fieldset class="space-y-2">
 						<legend class="field-label">Announce the claim, blank for none</legend>
 						<input
 							class="input"
@@ -4044,6 +4066,7 @@
 					</fieldset>
 					{@render placeholders('bounty', [
 						f.setMessage,
+						f.markedWhisper,
 						f.claimMessage,
 						f.whisper,
 						f.bountyReward === 'win' ? f.bountyWinMessage : ''

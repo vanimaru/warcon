@@ -70,6 +70,8 @@ export interface BountyConfig {
 	claimMessage: string;
 	/** whispered to the claimer; '' for none */
 	whisper: string;
+	/** whispered to the marked player as the bounty is set on them; '' for none */
+	markedWhisper: string;
 }
 
 export const BOUNTY_SET_MESSAGE =
@@ -82,6 +84,8 @@ export const BOUNTY_TOP_MESSAGE_PLAIN =
 	'BOUNTY on {name} of {faction}: {streak} kills, the most on their side. Who takes them down?';
 export const BOUNTY_MANUAL_MESSAGE = 'BOUNTY on {name} of {faction}. Kill them for {reward}.';
 export const BOUNTY_MANUAL_MESSAGE_PLAIN = 'BOUNTY on {name} of {faction}. Who takes them down?';
+export const BOUNTY_MARKED_WHISPER =
+	'You have a bounty on you: every enemy is hunting you. Stay alive!';
 export const BOUNTY_WIN_ASK = 'First side to {goal} bounties wins the match!';
 export const BOUNTY_WIN_MESSAGE = '{winner} wins the bounty hunt with {claims} bounties claimed!';
 export const BOUNTY_MAX_WIN_CLAIMS = 100;
@@ -152,7 +156,10 @@ export function validateBounty(c: Record<string, unknown>): BountyConfig {
 		scope: bountyScope(c),
 		setMessage: str(c.setMessage, MAX_CHAT) || bountySetDefault(pick, reward),
 		claimMessage: str(c.claimMessage, MAX_CHAT),
-		whisper: str(c.whisper, MAX_CHAT)
+		whisper: str(c.whisper, MAX_CHAT),
+		// a rule saved before it existed, or made through the API without it, whispers nothing; the
+		// editor starts a new rule with BOUNTY_MARKED_WHISPER
+		markedWhisper: str(c.markedWhisper, MAX_CHAT)
 	};
 }
 

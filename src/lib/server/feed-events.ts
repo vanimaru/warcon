@@ -690,7 +690,10 @@ async function actOnBounty(
 		const stats = await vars.stats(
 			events.flatMap((e) =>
 				e.kind === 'set'
-					? [{ steamId: e.bounty.steamId, text: cfg.setMessage }]
+					? [
+							{ steamId: e.bounty.steamId, text: cfg.setMessage },
+							{ steamId: e.bounty.steamId, text: cfg.markedWhisper ?? '' }
+						]
 					: e.kind === 'win'
 						? [{ steamId: e.claimer.steamId, text: cfg.winMessage ?? '' }]
 						: [
@@ -754,6 +757,21 @@ async function actOnBounty(
 					steamId: null,
 					dedupeKey: dedupe('set')
 				});
+				// the marked player is told it is them
+				if (cfg.markedWhisper)
+					out.intents.push({
+						trigger: row,
+						action: 'whisper',
+						params: {
+							steamId: b.steamId,
+							message: say(cfg.markedWhisper, b, own(b.name, b.streak, k.map), MAX_CHAT)
+						},
+						target: b.steamId,
+						okMessage: `Whispered ${b.name}: there is a bounty on them.`,
+						detail: { name: b.name, stage: 'marked', eventId: k.eventId },
+						steamId: b.steamId,
+						dedupeKey: dedupe('marked')
+					});
 				out.updates.push({
 					id: row.id,
 					lastFiredAt: new Date(now),

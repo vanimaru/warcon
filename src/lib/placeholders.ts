@@ -101,7 +101,7 @@ export const MESSAGE_RULES: Readonly<Partial<Record<TriggerKind, MessageRule>>> 
 	// with the win reward: `{goal}` the claims a side needs, `{claims}` the claimer's side's so far,
 	// `{winner}` the side that won (in the win message)
 	bounty: {
-		fields: ['setMessage', 'claimMessage', 'whisper', 'winMessage'],
+		fields: ['setMessage', 'markedWhisper', 'claimMessage', 'whisper', 'winMessage'],
 		own: ['target', 'streak', 'reward', 'days', 'until', 'goal', 'claims', 'winner'],
 		player: true,
 		kept: true

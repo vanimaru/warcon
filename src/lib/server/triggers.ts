@@ -2523,25 +2523,40 @@ async function evalBounty(
 		// said to the whole server, so no org-wide stats
 		const stats = await statsFor(
 			read,
-			picked.map((b) => ({ steamId: b.steamId, text: cfg.setMessage })),
+			picked.flatMap((b) => [
+				{ steamId: b.steamId, text: cfg.setMessage },
+				{ steamId: b.steamId, text: cfg.markedWhisper ?? '' }
+			]),
 			{ org: false }
 		);
 		for (const b of picked) {
 			const p = ctx.players.find((x) => x.steamId === b.steamId) ?? null;
-			const message = renderTemplate(
-				cfg.setMessage,
-				keptVars(
-					vars(ctx, p, statsOf(stats, b.steamId), {
-						target: b.name,
-						streak: b.streak,
-						reward,
-						days: slot ? cfg.slotDays : '',
-						until,
-						goal: cfg.reward === 'win' ? cfg.winClaims : ''
-					})
-				),
-				MAX_CHAT
+			const told = keptVars(
+				vars(ctx, p, statsOf(stats, b.steamId), {
+					target: b.name,
+					streak: b.streak,
+					reward,
+					days: slot ? cfg.slotDays : '',
+					until,
+					goal: cfg.reward === 'win' ? cfg.winClaims : ''
+				})
 			);
+			const message = renderTemplate(cfg.setMessage, told, MAX_CHAT);
+			// the marked player is told it is them
+			if (cfg.markedWhisper)
+				out.intents.push({
+					trigger: row,
+					action: 'whisper',
+					params: {
+						steamId: b.steamId,
+						message: renderTemplate(cfg.markedWhisper, told, MAX_CHAT)
+					},
+					target: b.steamId,
+					okMessage: `Whispered ${b.name}: there is a bounty on them.`,
+					detail: { name: b.name, stage: 'marked' },
+					steamId: b.steamId,
+					dedupeKey: key(row, 'marked', b.steamId, b.setAt)
+				});
 			const why =
 				b.how === 'top' ? `${b.streak} kills, top of ${b.faction}` : `named, ${b.faction}`;
 			out.intents.push({

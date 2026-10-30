@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
+	BOUNTY_MARKED_WHISPER,
 	bountyPicks,
 	bountyReplay,
 	bountyState,
@@ -68,7 +69,8 @@ describe('the Bounty rule, settings', () => {
 			scope: 'server',
 			setMessage: 'BOUNTY on {name}: {streak} kills without dying. Kill them for {reward}.',
 			claimMessage: '',
-			whisper: ''
+			whisper: '',
+			markedWhisper: ''
 		});
 		const c = validateBounty({
 			streak: 1,
@@ -468,5 +470,14 @@ describe('the Bounty rule, a hunt between the sides', () => {
 		expect(outcomes.filter((o) => o.kind === 'win')).toMatchObject([
 			{ kind: 'win', at: 3, faction: RED, claims: 2 }
 		]);
+	});
+});
+
+describe('the Bounty rule, telling the marked player', () => {
+	test('a whisper only when the rule has one: the editor starts a new rule with it', () => {
+		expect(validateBounty({}).markedWhisper).toBe('');
+		expect(validateBounty({ markedWhisper: BOUNTY_MARKED_WHISPER }).markedWhisper).toBe(
+			BOUNTY_MARKED_WHISPER
+		);
 	});
 });
