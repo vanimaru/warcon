@@ -50,6 +50,7 @@ const SILENT_INFECTION = {
 	infectedFaction: 'Manticore',
 	survivorFaction: 'Lonestar',
 	startMessage: '',
+	patientWhisper: '',
 	infectWhisper: '',
 	infectBroadcast: '',
 	fewLeftMessage: '',

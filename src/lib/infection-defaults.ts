@@ -2,6 +2,8 @@
 // (infection.ts) and the Automation tab starts a new rule's editor with them. Client-safe.
 export const INFECTION_DEFAULTS = {
 	startMessage: 'Infection! {patients} carry the infection. Survivors, hold out!',
+	patientWhisper:
+		'You were picked to carry the infection: you now fight for {team}. Infect the survivors!',
 	infectWhisper: 'You were infected by {killer}. You now fight for {team}.',
 	infectBroadcast: '',
 	fewLeftMessage: 'Only {survivors} survivors left!',

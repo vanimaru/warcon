@@ -245,6 +245,7 @@ import {
 	infectionSpeaks,
 	keepInfections,
 	roundCounts,
+	same as sameFaction,
 	type InfectionConfig,
 	type InfectionMemory,
 	type InfectionMove,
@@ -2047,11 +2048,21 @@ export function pushInfection(
 			dedupeKey: key(row, round, k)
 		});
 	};
+	// The round's first infected: moved with a kill when the rule says, so they respawn on the
+	// infected side instead of switching sides where they stand
+	const respawn = (m: InfectionMove) =>
+		cfg.respawnPatients && m.why === 'start' && sameFaction(m.to, cfg.infectedFaction);
 	for (const m of what.moves ?? [])
 		out.intents.push({
 			trigger: row,
 			action: 'changeTeam',
-			params: { steamId: m.steamId, faction: m.to, kill: false, from: m.from, rule: config },
+			params: {
+				steamId: m.steamId,
+				faction: m.to,
+				...(respawn(m) ? {} : { kill: false }),
+				from: m.from,
+				rule: config
+			},
 			target: m.steamId,
 			okMessage: `Moved ${m.name} to ${m.to}.`,
 			detail: { name: m.name, from: m.from, to: m.to, why: m.why, round },
@@ -2108,6 +2119,23 @@ export function pushInfection(
 				{ stage: 'start', patients },
 				'start'
 			);
+			// each first infected is told why their side changed
+			if (cfg.patientWhisper)
+				for (const p of n.patients)
+					out.intents.push({
+						trigger: row,
+						action: 'whisper',
+						params: {
+							steamId: p.steamId,
+							message: say(cfg.patientWhisper, p, own({ patients })),
+							rule: config
+						},
+						target: p.steamId,
+						okMessage: `Whispered ${p.name || p.steamId}: picked to carry the infection.`,
+						detail: { name: p.name || p.steamId, stage: 'patient', round },
+						steamId: p.steamId,
+						dedupeKey: key(row, round, p.steamId, 'patient')
+					});
 		} else if (n.kind === 'result') {
 			if (n.infectedWon === null) continue;
 			const text = n.infectedWon ? cfg.infectedWinMessage : cfg.survivorsWinMessage;

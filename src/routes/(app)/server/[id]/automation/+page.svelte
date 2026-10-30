@@ -621,6 +621,9 @@
 		perPlayers: number;
 		/** survivor counts to announce, comma-separated */
 		milestones: string;
+		patientWhisper: string;
+		/** an Infection rule moves the round's first infected with a kill, so they respawn */
+		respawnPatients: boolean;
 		infectWhisper: string;
 		infectBroadcast: string;
 		fewLeftMessage: string;
@@ -647,6 +650,7 @@
 	/** An Infection rule's texts, in the order a round goes, with what each is for. */
 	const INFECTION_TEXTS = [
 		['startMessage', 'When a round starts'],
+		['patientWhisper', "Whisper to each of the round's first infected"],
 		['infectWhisper', 'Whisper to the newly infected'],
 		['infectBroadcast', 'Broadcast at every infection'],
 		['fewLeftMessage', 'As the survivors fall to each count below'],
@@ -968,6 +972,9 @@
 			milestones: Array.isArray(c.milestones)
 				? (c.milestones as number[]).join(', ')
 				: '25, 10, 5',
+			patientWhisper: s('patientWhisper', INFECTION_DEFAULTS.patientWhisper),
+			// a new rule respawns its first infected on their new side
+			respawnPatients: b('respawnPatients', !t && kind === 'infection'),
 			infectWhisper: s('infectWhisper', INFECTION_DEFAULTS.infectWhisper),
 			infectBroadcast: s('infectBroadcast', INFECTION_DEFAULTS.infectBroadcast),
 			fewLeftMessage: s('fewLeftMessage', INFECTION_DEFAULTS.fewLeftMessage),
@@ -1231,6 +1238,8 @@
 						.map(Number),
 					minPlayers: Number(f.minPlayers),
 					startMessage: f.startMessage,
+					patientWhisper: f.patientWhisper,
+					respawnPatients: f.respawnPatients,
 					infectWhisper: f.infectWhisper,
 					infectBroadcast: f.infectBroadcast,
 					fewLeftMessage: f.fewLeftMessage,
@@ -2380,6 +2389,14 @@
 							/>
 							players are on
 						</div>
+						<label class="flex items-start gap-2 text-[13px]"
+							><input type="checkbox" class="mt-0.5" bind:checked={f.respawnPatients} />
+							<span
+								>Respawn the first infected: move them with a kill, so they come back at the infected
+								side's spawn instead of switching sides where they stand. Their whisper (below) tells
+								them why.</span
+							></label
+						>
 						<label class="flex items-center gap-2 text-[13px]"
 							><input type="checkbox" bind:checked={f.endMatch} disabled={!canMatch} /> End the match
 							once everyone is infected, so the next round starts on the next map</label
@@ -2453,6 +2470,7 @@
 						{/each}
 						{@render placeholders('infection', [
 							f.startMessage,
+							f.patientWhisper,
 							f.infectWhisper,
 							f.infectBroadcast,
 							f.lastSurvivorMessage,

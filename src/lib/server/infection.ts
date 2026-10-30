@@ -65,6 +65,12 @@ export interface InfectionConfig {
 	minPlayers: number;
 	/** broadcast when a round starts; `{patients}` names the first infected */
 	startMessage: string;
+	/** whispered to each of the round's first infected as they are moved, so a player switched
+	 *  without dying knows why; `{team}` is the infected faction */
+	patientWhisper: string;
+	/** move the round's first infected with a kill, so they respawn at the infected side's spawn
+	 *  rather than switching sides where they stand */
+	respawnPatients: boolean;
 	/** whispered to a survivor as they are infected; `{killer}` infected them */
 	infectWhisper: string;
 	/** broadcast at every infection; `{name}` the newly infected, `{killer}` who infected them */
@@ -144,6 +150,8 @@ export function validateInfection(c: Record<string, unknown>): InfectionConfig {
 		milestones,
 		minPlayers: int(c.minPlayers, 6, 2, 1000),
 		startMessage: text('startMessage'),
+		patientWhisper: text('patientWhisper'),
+		respawnPatients: c.respawnPatients === true,
 		infectWhisper: text('infectWhisper'),
 		infectBroadcast: text('infectBroadcast'),
 		fewLeftMessage: text('fewLeftMessage'),

@@ -112,6 +112,7 @@ export const MESSAGE_RULES: Readonly<Partial<Record<TriggerKind, MessageRule>>> 
 	infection: {
 		fields: [
 			'startMessage',
+			'patientWhisper',
 			'infectWhisper',
 			'infectBroadcast',
 			'fewLeftMessage',

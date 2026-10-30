@@ -53,6 +53,7 @@ describe('Infection settings', () => {
 				validateInfection({
 					...cfg,
 					startMessage: '',
+					patientWhisper: '',
 					infectWhisper: '',
 					infectBroadcast: '',
 					fewLeftMessage: '',
@@ -597,5 +598,14 @@ describe('Unlock teams', () => {
 		expect(ticked.unlockTeams).toBe(true);
 		expect(infectionSettingsKey(ticked)).toBe(infectionSettingsKey(cfg));
 		expect(infectionSettingsKey({ ...cfg, minPlayers: 9 })).not.toBe(infectionSettingsKey(cfg));
+	});
+});
+
+describe("the round's first infected", () => {
+	test('told why their side changed, and respawned there only when the rule says', () => {
+		expect(cfg.patientWhisper).toContain('{team}');
+		expect(cfg.respawnPatients).toBe(false);
+		expect(validateInfection({ ...cfg, respawnPatients: true }).respawnPatients).toBe(true);
+		expect(validateInfection({ ...cfg, patientWhisper: '' }).patientWhisper).toBe('');
 	});
 });
