@@ -1500,7 +1500,9 @@
 				const n = Number(c.startInfected) || 1;
 				const per = Number(c.perPlayers) || 0;
 				return [
-					`${c.infectedFaction} infect ${c.survivorFaction || 'every other faction'}`,
+					c.survivorFaction
+						? `two sides: ${c.infectedFaction} infect ${c.survivorFaction}`
+						: `${c.infectedFaction} infect every other faction`,
 					`${per ? `1 in ${per} (at least ${n})` : n} infected at the start, with ${c.minPlayers}+ on`,
 					Number(c.timeLimitMinutes) > 0
 						? `${c.timeLimitMinutes} min limit, survivors win when it runs out`
@@ -2284,6 +2286,27 @@
 				{:else if f.kind === 'infection'}
 					<fieldset class="space-y-2 text-[13px]">
 						<legend class="field-label">Sides</legend>
+						<div class="flex flex-wrap gap-x-4 gap-y-1">
+							<label class="flex items-center gap-2"
+								><input
+									type="radio"
+									name="infection-sides"
+									checked={!!f.survivorFaction.trim()}
+									onchange={() =>
+										(f.survivorFaction =
+											FACTIONS.find((x) => x.toLowerCase() !== f.infectedFaction.trim().toLowerCase()) ??
+											'')}
+								/> Two sides: infected against one survivors' faction</label
+							>
+							<label class="flex items-center gap-2"
+								><input
+									type="radio"
+									name="infection-sides"
+									checked={!f.survivorFaction.trim()}
+									onchange={() => (f.survivorFaction = '')}
+								/> Three sides: survivors on every other faction</label
+							>
+						</div>
 						<div class="flex flex-wrap items-center gap-2">
 							<span class="w-24">Infected</span>
 							<input
@@ -2298,23 +2321,29 @@
 						</div>
 						<div class="flex flex-wrap items-center gap-2">
 							<span class="w-24">Survivors</span>
-							<input
-								class="input w-40"
-								type="text"
-								list="infection-factions"
-								bind:value={f.survivorFaction}
-								maxlength="40"
-								aria-label="The survivors' faction"
-								placeholder="Every other faction"
-							/>
+							{#if f.survivorFaction.trim()}
+								<input
+									class="input w-40"
+									type="text"
+									list="infection-factions"
+									bind:value={f.survivorFaction}
+									maxlength="40"
+									aria-label="The survivors' faction"
+									required
+								/>
+							{:else}
+								<span class="text-mist-100">Every faction but the infected's</span>
+							{/if}
 						</div>
 						<datalist id="infection-factions">
 							{#each FACTIONS as x (x)}<option value={x}></option>{/each}
 						</datalist>
 						<p class="text-[12px] text-mist-600">
-							Empty: survivors keep the side they picked on every faction but the infected's, so
-							on a full server only the first infected move at the start. A faction named: everyone
-							else is moved onto it.
+							Two sides: everyone not infected is moved onto the survivors' faction at the start, and
+							the third faction is closed (anyone who picks it is moved: onto the survivors' side in
+							the round's first minute, onto the infected after). On a full server that is about two
+							thirds of the players, moved a few a second. Three sides: survivors keep the side they
+							picked, so only the first infected move at the start.
 						</p>
 					</fieldset>
 					<fieldset class="space-y-2">
