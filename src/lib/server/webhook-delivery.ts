@@ -289,6 +289,8 @@ export type BountyCard = {
 	reward: string;
 	/** the slot is on every server of the organisation */
 	orgWide: boolean;
+	/** how the player was picked: a run (absent on older cards), a side's top killer, or named */
+	how?: 'streak' | 'top' | 'manual';
 } & (
 	| { kind: 'set'; name: string; faction: string | null; streak: number }
 	| { kind: 'claim'; claimer: string; target: string; run: number }
@@ -307,7 +309,13 @@ export function buildBountyEmbed(appName: string, serverName: string, c: BountyC
 					// the name goes in the body, where it is escaped like every other name (titles are not)
 					title: 'Bounty set',
 					lines: [
-						`**${plain(c.name, 60)}**: ${c.streak} kills without dying${c.faction ? `, for ${plain(c.faction, 30)}` : ''}`,
+						`**${plain(c.name, 60)}**: ${
+							c.how === 'top'
+								? `${c.streak} kills, the most on their side`
+								: c.how === 'manual'
+									? 'a wanted player'
+									: `${c.streak} kills without dying`
+						}${c.faction ? `, for ${plain(c.faction, 30)}` : ''}`,
 						reward
 					]
 				}
@@ -315,16 +323,22 @@ export function buildBountyEmbed(appName: string, serverName: string, c: BountyC
 				? {
 						title: 'Bounty claimed',
 						lines: [
-							`**${plain(c.claimer, 60)}** ended **${plain(c.target, 60)}**'s run at ${c.run}`,
+							c.how && c.how !== 'streak'
+								? `**${plain(c.claimer, 60)}** took down **${plain(c.target, 60)}**`
+								: `**${plain(c.claimer, 60)}** ended **${plain(c.target, 60)}**'s run at ${c.run}`,
 							reward
 						]
 					}
 				: {
 						title: 'Bounty lapsed',
 						lines: [
-							c.why === 'left'
-								? `**${plain(c.name, 60)}** left the server on a run of ${c.run}`
-								: `The match ended with **${plain(c.name, 60)}** on a run of ${c.run}`
+							c.how && c.how !== 'streak'
+								? c.why === 'left'
+									? `**${plain(c.name, 60)}** left the server`
+									: `The match ended with **${plain(c.name, 60)}** still wanted`
+								: c.why === 'left'
+									? `**${plain(c.name, 60)}** left the server on a run of ${c.run}`
+									: `The match ended with **${plain(c.name, 60)}** on a run of ${c.run}`
 						]
 					};
 	return {

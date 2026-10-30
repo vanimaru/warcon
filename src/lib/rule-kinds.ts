@@ -123,7 +123,7 @@ export const RULE_KINDS: { kind: TriggerKind; group: RuleGroup; label: string; b
 		group: 'Seeding and rewards',
 		label: 'Bounty',
 		blurb:
-			'Put a bounty on a player on a kill streak; whoever kills them first gets a reserved slot.'
+			"Put a bounty on a player on a kill streak, each side's top killers, or players you name; whoever kills them first gets a reserved slot."
 	},
 	{
 		kind: 'two_teams',

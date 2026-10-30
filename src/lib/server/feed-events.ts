@@ -74,6 +74,7 @@ import {
 	fromEarlierMatch,
 	bountyStep,
 	bountyTrack,
+	runWords,
 	keepBounties,
 	rewardWords,
 	type BountyConfig,
@@ -639,7 +640,8 @@ async function actOnBounty(
 	for (const row of rows) {
 		const cfg = row.config as BountyConfig;
 		const { version, track } = bountyTrack(row);
-		const before = track.open;
+		const before = [...track.open];
+		const claimedBefore = new Set(track.claimed);
 		const out: Evaluation = { intents: [], updates: [] };
 		const cards: BountyCard[] = [];
 		// The match this batch was stamped with, read only when a bounty is set or its player dies.
@@ -648,16 +650,18 @@ async function actOnBounty(
 			(stamped ??= matchKey(await stampedMatch(env, serverId, batch), Date.parse(batch[0].ts)));
 		// A bounty read back after a restart can be from a match that ended while no worker watched:
 		// the batch that could claim it says which match it is in, and an earlier match's lapses.
-		const open = track.open;
-		if (
-			open?.match.startsWith('m') &&
-			inOrder.some((k) => k.victim.steamId === open.steamId) &&
-			fromEarlierMatch(open.match, await batchMatch()) &&
-			track.open === open
-		) {
-			track.open = null;
+		for (const open of [...track.open]) {
+			if (
+				!open.match.startsWith('m') ||
+				!inOrder.some((k) => k.victim.steamId === open.steamId) ||
+				!fromEarlierMatch(open.match, await batchMatch()) ||
+				!track.open.includes(open)
+			)
+				continue;
+			track.open = track.open.filter((b) => b !== open);
 			track.runs.clear();
-			const lapse = bountyLapse(row, cfg, version, open, 'match', new Date(now), sorted[0].map);
+			track.claimed.clear();
+			const lapse = bountyLapse(row, cfg, open, 'match', new Date(now), sorted[0].map);
 			out.intents.push(lapse.intent);
 			out.updates.push(lapse.update);
 			cards.push(lapse.card);
@@ -726,8 +730,8 @@ async function actOnBounty(
 			const b = e.bounty;
 			const c = e.claimer;
 			const claimer = c.name || c.steamId;
-			const claimed = `${claimer} claimed the bounty on ${b.name} (a run of ${b.best}).`;
-			const extra = own(b.name, b.best, k.map);
+			const claimed = `${claimer} claimed the bounty on ${b.name} (${runWords(b)}).`;
+			const extra = own(b.name, b.how === 'streak' ? b.best : b.streak, k.map);
 			out.intents.push({
 				trigger: row,
 				action: BOUNTY_CLAIM,
@@ -793,15 +797,16 @@ async function actOnBounty(
 				...card,
 				kind: 'claim',
 				map: k.map || null,
+				how: b.how,
 				claimer,
 				target: b.name,
 				run: b.best
 			});
 		}
-		// The open bounty as it stands after the batch, on the last update (they are applied in order).
-		const state = bountyState(version, track.open);
+		// The open bounties as they stand after the batch, on the last update (applied in order).
+		const state = bountyState(version, track.open, track.claimed);
 		out.updates[out.updates.length - 1].state = state;
-		const after = track.open;
+		const after = JSON.stringify(state);
 		let queued = 0;
 		try {
 			await withOwnedTransaction(env, async (tx) => {
@@ -809,8 +814,11 @@ async function actOnBounty(
 				await applyTriggerUpdates(tx, out.updates);
 			});
 		} catch (err) {
-			// Not written: the bounty goes back to what it was, unless a look has moved it on since.
-			if (track.open === after) track.open = before;
+			// Not written: the bounties go back to what they were, unless a look has moved them on since.
+			if (JSON.stringify(bountyState(version, track.open, track.claimed)) === after) {
+				track.open = before;
+				track.claimed = claimedBefore;
+			}
 			throw err;
 		}
 		row.state = state;

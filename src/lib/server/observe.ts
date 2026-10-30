@@ -866,9 +866,7 @@ export async function observeServer(env: Env, m: ServerMemory, kinds: ObserveKin
 	// found put back once it is off. A server's rows are read once for a hold a switched-off rule left.
 	const unlockRule = rows.find(wantsUnlock);
 	if (isOwner() && m.status && (unlockRule || m.teamUnlock || !m.teamUnlockRead))
-		await stage('team lock', m, () =>
-			keepTeamUnlock(env, m, client, unlockRule, started, period)
-		);
+		await stage('team lock', m, () => keepTeamUnlock(env, m, client, unlockRule, started, period));
 	if (diff.joined.length && steamEnabled(env))
 		void getProfiles(
 			env,

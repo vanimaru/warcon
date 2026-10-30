@@ -35,11 +35,15 @@
 		DryRunResult,
 		MapSelection,
 		OutboxView,
+		Player,
 		Status,
 		TriggerKind,
 		TriggerView
 	} from '$lib/types';
 	import type { PageProps } from './$types';
+
+	/** who a Bounty rule marks: a run, each side's top killers, or the players it names */
+	type BountyPickForm = 'streak' | 'top' | 'manual';
 
 	let { data }: PageProps = $props();
 	let id = $derived(data.server.id);
@@ -110,6 +114,8 @@
 	let deliveriesTimer: ReturnType<typeof setTimeout> | undefined;
 	/** what the server shows now, for a Live server name rule's preview */
 	let liveStatus = $state<Status | null>(null);
+	/** who is on now, for a Bounty rule's named players */
+	let livePlayers = $state<Player[]>([]);
 	async function refreshDeliveries() {
 		try {
 			deliveries = (
@@ -127,6 +133,7 @@
 			(v) => {
 				const was = liveStatus?.serverName;
 				liveStatus = v.status;
+				livePlayers = v.players;
 				// a Live server name rule's row says what it last wrote: re-read it when the name moves
 				if (
 					was !== undefined &&
@@ -362,25 +369,50 @@
 										  kind === 'kill_race'
 										? 'Needs Match control'
 										: '';
-	/** A Bounty rule's texts until they are written: a slot is named, an announcement-only rule asks. */
-	const bountyTexts = (reward: 'slot' | 'none') =>
-		reward === 'slot'
-			? {
-					setMessage: 'BOUNTY on {name}: {streak} kills without dying. Kill them for {reward}.',
-					claimMessage: "{name} ended {target}'s run of {streak} and takes {reward}.",
-					whisper: 'Bounty claimed. Your reserved slot lasts until {until}.'
-				}
-			: {
-					setMessage: 'BOUNTY on {name}: {streak} kills without dying. Who ends the run?',
-					claimMessage: "{name} ended {target}'s run of {streak}.",
-					whisper: ''
-				};
-	/** Switching the reward swaps the texts still as the rule began them. */
-	const swapBounty = (f: Form) => {
-		const from = bountyTexts(f.bountyReward === 'slot' ? 'none' : 'slot');
-		const to = bountyTexts(f.bountyReward);
+	/**
+	 * A Bounty rule's texts until they are written, by who it marks and its reward: a slot is named,
+	 * an announcement-only rule asks.
+	 */
+	const bountyTexts = (reward: 'slot' | 'none', pick: BountyPickForm = 'streak') => {
+		const slot = reward === 'slot';
+		const set =
+			pick === 'top'
+				? '{name} of {faction}: {streak} kills, the most on their side.'
+				: pick === 'manual'
+					? '{name} of {faction}.'
+					: '{name}: {streak} kills without dying.'
+		const ask = pick === 'streak' ? 'Who ends the run?' : 'Who takes them down?';
+		const claim =
+			pick === 'streak' ? "{name} ended {target}'s run of {streak}" : '{name} took down {target}';
+		return {
+			setMessage: `BOUNTY on ${set} ${slot ? 'Kill them for {reward}.' : ask}`,
+			claimMessage: slot ? `${claim} and takes {reward}.` : `${claim}.`,
+			whisper: slot ? 'Bounty claimed. Your reserved slot lasts until {until}.' : ''
+		};
+	};
+	/** Switching the reward or the pick swaps the texts still as the rule began them. */
+	const swapBounty = (
+		f: Form,
+		was: { reward?: Form['bountyReward']; pick?: BountyPickForm } = {}
+	) => {
+		const from = bountyTexts(
+			was.reward ?? (f.bountyReward === 'slot' ? 'none' : 'slot'),
+			was.pick ?? f.bountyPick
+		);
+		const to = bountyTexts(f.bountyReward, f.bountyPick);
 		for (const k of ['setMessage', 'claimMessage', 'whisper'] as const)
 			if (f[k] === from[k]) f[k] = to[k];
+	};
+	/** A Bounty rule's named player added from who is on, or by SteamID64. */
+	const addWanted = (f: Form, steamId: string, name = '') => {
+		const id = steamId.trim();
+		if (!/^\d{17}$/.test(id)) {
+			toast.error('Give a SteamID64: 17 digits.');
+			return;
+		}
+		if (f.wanted.some((w) => w.steamId === id)) return;
+		const on = livePlayers.find((p) => p.steamId === id);
+		f.wanted = [...f.wanted, { steamId: id, name: name || on?.name || id }];
 	};
 	/** The Add rule picker is open; `fromPicker`: the editor came from it, so it offers the way back. */
 	let picking = $state(false);
@@ -547,6 +579,12 @@
 		doneMessage: string;
 		streak: number;
 		bountyReward: 'slot' | 'none';
+		/** a Bounty rule's pick, its bounties on each side at once, the top's kills, the named */
+		bountyPick: BountyPickForm;
+		perFaction: number;
+		minKills: number;
+		wanted: { steamId: string; name: string }[];
+		wantedInput: string;
 		setMessage: string;
 		claimMessage: string;
 		whisper: string;
@@ -735,6 +773,8 @@
 		// a new Bounty rule gives a slot when its author may reserve one, and announces only otherwise
 		const bountyReward: Form['bountyReward'] =
 			c.reward === 'none' || (!t && !canSlotHere && !canSlotOrg) ? 'none' : 'slot';
+		const bountyPick: BountyPickForm =
+			c.pick === 'top' || c.pick === 'manual' ? c.pick : 'streak';
 		form = {
 			id: copy ? null : (t?.id ?? null),
 			kind,
@@ -875,9 +915,16 @@
 			doneMessage: s('doneMessage', 'Thanks for seeding {server}! The match is live.'),
 			streak: n('streak', 15),
 			bountyReward,
-			setMessage: s('setMessage', bountyTexts(bountyReward).setMessage),
-			claimMessage: s('claimMessage', bountyTexts(bountyReward).claimMessage),
-			whisper: s('whisper', bountyTexts(bountyReward).whisper),
+			bountyPick,
+			perFaction: n('perFaction', 1),
+			minKills: n('minKills', 5),
+			wanted: Array.isArray(c.wanted)
+				? (c.wanted as { steamId: string; name: string }[]).map((w) => ({ ...w }))
+				: [],
+			wantedInput: '',
+			setMessage: s('setMessage', bountyTexts(bountyReward, bountyPick).setMessage),
+			claimMessage: s('claimMessage', bountyTexts(bountyReward, bountyPick).claimMessage),
+			whisper: s('whisper', bountyTexts(bountyReward, bountyPick).whisper),
 			mapOrder: mapTurn(c.maps),
 			// a new rule starts from the name the server shows now
 			liveBase: s('base', liveStatus?.serverName ?? ''),
@@ -1109,6 +1156,10 @@
 				};
 			case 'bounty':
 				return {
+					pick: f.bountyPick,
+					perFaction: Number(f.perFaction),
+					minKills: Number(f.minKills),
+					wanted: f.wanted,
 					streak: Number(f.streak),
 					minPlayers: Number(f.minPlayers),
 					reward: f.bountyReward,
@@ -1437,8 +1488,17 @@
 				return `kill everyone every ${c.everyMinutes} min while fewer than ${c.stopAt} are on and no side has scored · then off until the server empties or restarts${c.message ? ' · with a broadcast' : ''}${c.doneMessage ? ' · thanks at the start' : ''}`;
 			case 'bounty': {
 				const days = Number(c.slotDays);
+				const per = Number(c.perFaction) || 1;
+				const wanted = Array.isArray(c.wanted) ? (c.wanted as { name: string }[]) : [];
 				return [
-					`${c.streak} kills without dying, with ${c.minPlayers}+ on`,
+					c.pick === 'top'
+						? `each side's top ${per === 1 ? 'killer' : `${per} killers`} with ${c.minKills}+ kills, with ${c.minPlayers}+ on`
+						: c.pick === 'manual'
+							? `${wanted.length} named (${wanted
+									.slice(0, 3)
+									.map((w) => w.name)
+									.join(', ')}${wanted.length > 3 ? ', …' : ''}), up to ${per} a side, with ${c.minPlayers}+ on`
+							: `${c.streak} kills without dying, with ${c.minPlayers}+ on`,
 					c.reward === 'none'
 						? 'announced only'
 						: `reserved slot ${c.scope === 'org' ? 'on every server' : 'here'} for ${days} day${days === 1 ? '' : 's'}`,
@@ -1583,16 +1643,21 @@
 							{describe(t.kind, t.config)}
 						{/if}
 					</div>
-					{#if t.kind === 'bounty' && t.enabled && t.bounty}
-						{@const b = t.bounty}
-						<div class="mt-0.5 text-[12px] text-mist-100">
-							Open: <a
-								class="link"
-								href="/server/{id}/players/{b.steamId}"
-								data-sveltekit-preload-data="tap">{b.name}</a
-							>, marked at {b.streak} kills without dying · set
-							<span title={fmtTime(b.setAt)}>{fmtAgo(b.setAt, now)}</span>
-						</div>
+					{#if t.kind === 'bounty' && t.enabled && t.bounties?.length}
+						{#each t.bounties as b (b.steamId)}
+							<div class="mt-0.5 text-[12px] text-mist-100">
+								Open: <a
+									class="link"
+									href="/server/{id}/players/{b.steamId}"
+									data-sveltekit-preload-data="tap">{b.name}</a
+								>{b.faction ? ` (${b.faction})` : ''}, {b.how === 'top'
+									? `top of their side at ${b.streak} kills`
+									: b.how === 'manual'
+										? 'named by the rule'
+										: `marked at ${b.streak} kills without dying`} · set
+								<span title={fmtTime(b.setAt)}>{fmtAgo(b.setAt, now)}</span>
+							</div>
+						{/each}
 					{/if}
 					{#if t.kind === 'afk_protection' && t.enabled && t.phase}
 						{@const phase = t.phase}
@@ -3636,19 +3701,56 @@
 				{:else if f.kind === 'bounty'}
 					<fieldset class="space-y-1.5 text-[13px]">
 						<legend class="field-label">Who gets a bounty</legend>
-						<div class="flex flex-wrap items-center gap-2">
-							A player who gets
-							<input
-								class="input w-20 text-right"
-								type="number"
-								min="3"
-								max="200"
-								bind:value={f.streak}
-								aria-label="Kills in a row without dying"
-								required
-							/>
-							kills in a row without dying in one match,
-						</div>
+						{#each [['streak', 'A run of kills without dying (one bounty on the server at a time)'], ['top', "Each side's top killers of the match"], ['manual', 'Players named here']] as [value, text] (value)}
+							<label class="flex items-center gap-2"
+								><input
+									type="radio"
+									name="bounty-pick"
+									{value}
+									checked={f.bountyPick === value}
+									onchange={() => {
+										const was = f.bountyPick;
+										f.bountyPick = value as BountyPickForm;
+										swapBounty(f, { reward: f.bountyReward, pick: was });
+									}}
+								/>
+								{text}</label
+							>
+						{/each}
+						{#if f.bountyPick === 'streak'}
+							<div class="flex flex-wrap items-center gap-2">
+								A player who gets
+								<input
+									class="input w-20 text-right"
+									type="number"
+									min="3"
+									max="200"
+									bind:value={f.streak}
+									aria-label="Kills in a row without dying"
+									required
+								/>
+								kills in a row without dying in one match,
+							</div>
+						{:else}
+							<div class="flex flex-wrap items-center gap-2">
+								Up to
+								<select class="input w-16" bind:value={f.perFaction} aria-label="Bounties on each side">
+									{#each [1, 2, 3] as n (n)}<option value={n}>{n}</option>{/each}
+								</select>
+								at once on each side{#if f.bountyPick === 'top'}, the side's top killers once they have
+									at least
+									<input
+										class="input w-20 text-right"
+										type="number"
+										min="1"
+										max="200"
+										bind:value={f.minKills}
+										aria-label="At least, kills this match"
+										required
+									/>
+									kills this match{/if},
+							</div>
+						{/if}
 						<div class="flex flex-wrap items-center gap-2">
 							while at least
 							<input
@@ -3661,10 +3763,76 @@
 							/>
 							players are on
 						</div>
-						<p class="text-[12px] text-mist-600">
-							Team kills do not add to a run; any death ends it. One bounty at a time: the next goes
-							to whoever is on a run once this one ends.
-						</p>
+						{#if f.bountyPick === 'streak'}
+							<p class="text-[12px] text-mist-600">
+								Team kills do not add to a run; any death ends it. One bounty at a time: the next goes
+								to whoever is on a run once this one ends.
+							</p>
+						{:else if f.bountyPick === 'top'}
+							<p class="text-[12px] text-mist-600">
+								Kills are the scoreboard's for the match. While a side has fewer bounties open than
+								the limit, its top killers not yet marked are, highest first. A bounty stays on its
+								player until it is claimed or lapses, even if someone passes them; a player whose
+								bounty was claimed is not marked again that match.
+							</p>
+						{:else}
+							<div class="space-y-1.5">
+								{#each f.wanted as w (w.steamId)}
+									<div class="flex items-center gap-2">
+										<span class="text-mist-100">{w.name}</span>
+										<span class="font-mono text-[12px] text-mist-600">{w.steamId}</span>
+										{#if livePlayers.some((p) => p.steamId === w.steamId)}<Badge tone="ok">on</Badge
+											>{/if}
+										<button
+											type="button"
+											class="link text-[12px]"
+											onclick={() => (f.wanted = f.wanted.filter((x) => x.steamId !== w.steamId))}
+											>Remove</button
+										>
+									</div>
+								{:else}
+									<p class="text-[12px] text-warn">Name at least one player.</p>
+								{/each}
+								<div class="flex flex-wrap items-center gap-2">
+									<select
+										class="input w-56"
+										aria-label="Add a player who is on"
+										onchange={(e) => {
+											const el = e.currentTarget;
+											if (el.value) addWanted(f, el.value);
+											el.value = '';
+										}}
+									>
+										<option value="">Add a player who is on…</option>
+										{#each livePlayers.filter((p) => !f.wanted.some((w) => w.steamId === p.steamId)) as p (p.steamId)}
+											<option value={p.steamId}>{p.name}{p.faction ? ` (${p.faction})` : ''}</option>
+										{/each}
+									</select>
+									<input
+										class="input w-48 font-mono"
+										type="text"
+										data-plain
+										placeholder="or a SteamID64"
+										bind:value={f.wantedInput}
+										aria-label="SteamID64 to add"
+									/>
+									<button
+										type="button"
+										class="btn btn-sm"
+										disabled={!f.wantedInput.trim()}
+										onclick={() => {
+											addWanted(f, f.wantedInput);
+											f.wantedInput = '';
+										}}>Add</button
+									>
+								</div>
+							</div>
+							<p class="text-[12px] text-mist-600">
+								A named player is marked whenever they are on and their side has fewer bounties open
+								than the limit, in the order named. Once their bounty is claimed they are not marked
+								again that match; the next match marks them again.
+							</p>
+						{/if}
 					</fieldset>
 					<fieldset class="space-y-1.5 text-[13px]">
 						<legend class="field-label">Reward for the first to kill them</legend>
@@ -3757,7 +3925,9 @@
 					{@render placeholders('bounty', [f.setMessage, f.claimMessage, f.whisper])}
 					<p class="note">
 						{'{name}'} is the marked player when the bounty is set and the claimer after;
-						{'{target}'} is always the marked player, {'{streak}'} their run{#if f.bountyReward === 'slot'},
+						{'{target}'} is always the marked player, {'{streak}'} {f.bountyPick === 'streak'
+							? 'their run'
+							: 'their kills in the match when marked'}, {'{faction}'} their side{#if f.bountyReward === 'slot'},
 							{'{reward}'} “a reserved slot for {Number(f.slotDays)}
 							day{Number(f.slotDays) === 1 ? '' : 's'}”{/if}. The bounty and the claim are broadcast
 						to the whole server.

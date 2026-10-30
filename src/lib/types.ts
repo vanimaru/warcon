@@ -602,8 +602,15 @@ export interface TriggerView {
 	createdAt: string | null;
 	/** an AFK protection rule's standing: acting while the server seeds, or off since a match went live */
 	phase?: { on: boolean; since: string | null; why: string } | null;
-	/** a Bounty rule's open bounty: on whom, the run that set it, and when */
-	bounty?: { steamId: string; name: string; streak: number; setAt: string } | null;
+	/** a Bounty rule's open bounties: on whom, their side, the run or kills that set it, how, and when */
+	bounties?: {
+		steamId: string;
+		name: string;
+		faction: string | null;
+		streak: number;
+		how: 'streak' | 'top' | 'manual';
+		setAt: string;
+	}[];
 	/**
 	 * a Live server name rule's last write (the name and when) and why the latest try wrote nothing
 	 * ('' when it did); `restored` once its own name went back after it was switched off

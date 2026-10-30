@@ -189,9 +189,12 @@ import {
 	bountyState,
 	bountyTrack,
 	forgetBounties,
+	bountyPick,
+	bountyPicks,
 	lapseWords,
+	runWords,
 	rewardWords,
-	savedBounty,
+	savedBounties,
 	bountyVersion,
 	type BountyConfig,
 	type BountyKill,
@@ -302,7 +305,7 @@ const shape = (t: TriggerRow): TriggerView => ({
 	fireCount: t.fireCount,
 	createdAt: t.createdAt ? t.createdAt.toISOString() : null,
 	...(t.kind === 'afk_protection' ? { phase: afkPhase(t.state) } : {}),
-	...(t.kind === 'bounty' ? { bounty: openBounty(t) } : {}),
+	...(t.kind === 'bounty' ? { bounties: openBounties(t) } : {}),
 	...(t.kind === 'live_name' ? { liveName: lastName(t.state) } : {})
 });
 
@@ -315,12 +318,16 @@ function lastName(state: unknown): TriggerView['liveName'] {
 		: null;
 }
 
-/** A Bounty rule's open bounty, as its row shows it: the one its last save holds, if any. */
-function openBounty(t: TriggerRow): TriggerView['bounty'] {
-	const b = savedBounty(t.state, bountyVersion(t));
-	return b
-		? { steamId: b.steamId, name: b.name, streak: b.streak, setAt: new Date(b.setAt).toISOString() }
-		: null;
+/** A Bounty rule's open bounties, as its row shows them: the ones its last save holds. */
+function openBounties(t: TriggerRow): TriggerView['bounties'] {
+	return savedBounties(t.state, bountyVersion(t)).open.map((b) => ({
+		steamId: b.steamId,
+		name: b.name,
+		faction: b.faction,
+		streak: b.streak,
+		how: b.how,
+		setAt: new Date(b.setAt).toISOString()
+	}));
 }
 
 /** Where an AFK protection rule stands, as its row shows it; null until the worker has looked. */
@@ -977,8 +984,9 @@ export async function evaluateTriggers(
 					await evalAfkWatch(ctx, row, row.config as AfkWatchConfig, out, read);
 					break;
 				case 'bounty':
-					// Kills move it on as they arrive (feed-events.ts); a look ends it.
-					evalBounty(env, ctx, row, row.config as BountyConfig, out);
+					// Kills move it on as they arrive (feed-events.ts); a look ends bounties, and with the
+					// top or named pick marks players.
+					await evalBounty(env, ctx, row, row.config as BountyConfig, out, read);
 					break;
 				case 'rotation_shuffle':
 					evalRotationShuffle(ctx, row, row.config as RotationShuffleConfig, out);
@@ -2408,66 +2416,140 @@ async function evalAfkWatch(
 }
 
 /**
- * A Bounty rule at each look: a match end starts the runs over, and an open bounty lapses when the
- * match ends, when its player's session closes (gone past the leave grace, so a map change's empty
- * list is no leave), or at the first look after the server was out of reach (whatever happened
- * meanwhile, its restart among it, is unknown). Kills set and claim bounties as they arrive
- * (feed-events.ts). The bounty is let go here, before the look is written, so no kill claims it
- * meanwhile; a look whose write fails leaves it open on the rule's row only, where a restart reads
- * it back and the next look or claim lapses it (a claim checks the bounty's match).
+ * A Bounty rule at each look: a match end starts the runs and the claimed over, and an open bounty
+ * lapses when the match ends, when its player's session closes (gone past the leave grace, so a map
+ * change's empty list is no leave), or at the first look after the server was out of reach (whatever
+ * happened meanwhile, its restart among it, is unknown). With the top or named pick a look with a
+ * fresh player list then marks players (bountyPicks), each announced. Kills set (the streak pick)
+ * and claim bounties as they arrive (feed-events.ts). A bounty is let go here, before the look is
+ * written, so no kill claims it meanwhile; a look whose write fails leaves it open on the rule's row
+ * only, where a restart reads it back and the next look or claim lapses it (a claim checks the
+ * bounty's match).
  */
-function evalBounty(
+async function evalBounty(
 	env: Env,
 	ctx: TickContext,
 	row: TriggerRow,
 	cfg: BountyConfig,
-	out: Evaluation
+	out: Evaluation,
+	read: StatsReader
 ) {
 	const { version, track } = bountyTrack(row);
 	if (ctx.matchEnd || ctx.recovered) track.runs.clear();
-	const open = track.open;
-	if (!open) return;
-	const why: BountyLapse | null = ctx.matchEnd
-		? 'match'
-		: ctx.recovered
-			? 'lost'
-			: ctx.playersObserved && ctx.present && !ctx.present.has(open.steamId)
-				? 'left'
-				: null;
-	if (!why) return;
-	track.open = null;
-	const lapse = bountyLapse(
-		row,
-		cfg,
-		version,
-		open,
-		why,
-		ctx.ts,
-		ctx.matchEnd?.map ?? ctx.status.map
-	);
-	out.intents.push(lapse.intent);
-	out.updates.push(lapse.update);
+	if (ctx.matchEnd) track.claimed.clear();
+	const lapsed: { open: OpenBounty; why: BountyLapse }[] = [];
+	for (const open of track.open) {
+		const why: BountyLapse | null = ctx.matchEnd
+			? 'match'
+			: ctx.recovered
+				? 'lost'
+				: ctx.playersObserved && ctx.present && !ctx.present.has(open.steamId)
+					? 'left'
+					: null;
+		if (why) lapsed.push({ open, why });
+	}
+	track.open = track.open.filter((b) => !lapsed.some((l) => l.open === b));
+	const now = ctx.ts.getTime();
+	const on = Math.max(ctx.status.playerCount || 0, ctx.players.length);
+	const picked =
+		ctx.playersObserved && !ctx.matchEnd && !ctx.recovered
+			? bountyPicks(
+					cfg,
+					track,
+					ctx.players.map((p) => ({
+						steamId: p.steamId,
+						name: p.name,
+						faction: p.faction,
+						kills: p.kills
+					})),
+					{ canMark: on >= cfg.minPlayers, now }
+				)
+			: [];
+	if (!lapsed.length && !picked.length) return;
+	const map = ctx.matchEnd?.map ?? ctx.status.map;
+	const cards: BountyCard[] = [];
+	for (const { open, why } of lapsed) {
+		const lapse = bountyLapse(row, cfg, open, why, ctx.ts, map);
+		out.intents.push(lapse.intent);
+		out.updates.push(lapse.update);
+		cards.push(lapse.card);
+	}
+	if (picked.length) {
+		const reward = rewardWords(cfg);
+		const slot = cfg.reward === 'slot';
+		const until = slot ? new Date(now + cfg.slotDays * 86400_000).toISOString().slice(0, 10) : '';
+		// said to the whole server, so no org-wide stats
+		const stats = await statsFor(
+			read,
+			picked.map((b) => ({ steamId: b.steamId, text: cfg.setMessage })),
+			{ org: false }
+		);
+		for (const b of picked) {
+			const p = ctx.players.find((x) => x.steamId === b.steamId) ?? null;
+			const message = renderTemplate(
+				cfg.setMessage,
+				keptVars(
+					vars(ctx, p, statsOf(stats, b.steamId), {
+						target: b.name,
+						streak: b.streak,
+						reward,
+						days: slot ? cfg.slotDays : '',
+						until
+					})
+				),
+				MAX_CHAT
+			);
+			const why =
+				b.how === 'top' ? `${b.streak} kills, top of ${b.faction}` : `named, ${b.faction}`;
+			out.intents.push({
+				trigger: row,
+				action: 'broadcast',
+				params: { message },
+				target: b.steamId,
+				okMessage: `Announced the bounty on ${b.name} (${why}).`,
+				detail: { name: b.name, streak: b.streak, faction: b.faction, how: b.how, stage: 'set' },
+				steamId: null,
+				dedupeKey: key(row, 'set', b.steamId, b.setAt)
+			});
+			out.updates.push({
+				id: row.id,
+				lastFiredAt: ctx.ts,
+				lastResult: `Bounty on ${b.name} (${why})`
+			});
+			cards.push({
+				kind: 'set',
+				at: ctx.ts.toISOString(),
+				map: map || null,
+				reward,
+				orgWide: slot && cfg.scope === 'org',
+				how: b.how,
+				name: b.name,
+				faction: b.faction,
+				streak: b.streak
+			});
+		}
+	}
+	// the open bounties as they stand, on the last update (they are applied in order)
+	const state = bountyState(version, track.open, track.claimed);
+	row.state = state;
+	out.updates[out.updates.length - 1].state = state;
 	const serverName = ctx.status.serverName || ctx.server.name;
-	(out.afterCommit ??= []).push(
-		() => void notifyBounty(env, ctx.server.id, serverName, [lapse.card])
-	);
+	(out.afterCommit ??= []).push(() => void notifyBounty(env, ctx.server.id, serverName, cards));
 }
 
 /**
  * What a bounty lapsing writes: the note in the trail (Recent actions, the Automation mirror), the
- * rule's row with no bounty open, and the card for a Bounties channel, posted once it is written.
+ * rule's row's line, and the card for a Bounties channel, posted once it is written. The caller puts
+ * the open bounties left on the row's state.
  */
 export function bountyLapse(
 	row: TriggerRow,
 	cfg: BountyConfig,
-	version: string,
 	open: OpenBounty,
 	why: BountyLapse,
 	at: Date,
 	map: string | null
 ): { intent: Intent; update: TriggerUpdate; card: BountyCard } {
-	const state = bountyState(version, null);
-	row.state = state;
 	const message = lapseWords(open, why);
 	return {
 		intent: {
@@ -2480,13 +2562,14 @@ export function bountyLapse(
 			steamId: null,
 			dedupeKey: key(row, 'lapse', open.steamId, open.setAt)
 		},
-		update: { id: row.id, lastFiredAt: at, lastResult: message, state },
+		update: { id: row.id, lastFiredAt: at, lastResult: message },
 		card: {
 			kind: 'lapse',
 			at: at.toISOString(),
 			map: map || null,
 			reward: rewardWords(cfg),
 			orgWide: cfg.reward === 'slot' && cfg.scope === 'org',
+			how: open.how,
 			name: open.name,
 			run: open.best,
 			why
@@ -3341,21 +3424,27 @@ export async function dryRun(
 						}
 					)
 				);
+				const how =
+					b.how === 'top'
+						? `${b.streak} kills, top of ${b.faction}`
+						: b.how === 'manual'
+							? `named, ${b.faction}`
+							: `${b.streak} kills`;
 				push(
 					at,
-					`bounty on ${b.name} (${b.streak} kills, ${o.players} on): ${renderTemplate(c.setMessage, v, MAX_CHAT)}`
+					`bounty on ${b.name} (${how}, ${o.players} on): ${renderTemplate(c.setMessage, v, MAX_CHAT)}`
 				);
 			} else if (o.kind === 'claim')
 				note(
 					at,
-					`claimed by ${o.claimer.name || o.claimer.steamId}: ${b.name} after a run of ${b.best}${slot ? `, ${reward}` : ''}`
+					`claimed by ${o.claimer.name || o.claimer.steamId}: ${b.name} (${runWords(b)})${slot ? `, ${reward}` : ''}`
 				);
 			else
 				note(
 					at,
 					o.why === 'left'
-						? `lapsed: ${b.name} left (a run of ${b.best})`
-						: `lapsed: the match ended, ${b.name} on a run of ${b.best}`
+						? `lapsed: ${b.name} left (${runWords(b)})`
+						: `lapsed: the match ended, ${b.name} still marked (${runWords(b)})`
 				);
 		}
 		const [feed] = await env.db
@@ -3368,7 +3457,13 @@ export async function dryRun(
 			);
 		const n = (x: number, one: string, many = `${one}s`) => `${x} ${x === 1 ? one : many}`;
 		result.notes.push(
-			`${n(counted.set, 'bounty', 'bounties')} set, ${counted.claim} claimed, ${counted.lapse} lapsed${open ? ', one still open' : ''}. Runs start over at each match, and nobody is marked while the server's samples show fewer than ${c.minPlayers} on.`
+			`${n(counted.set, 'bounty', 'bounties')} set, ${counted.claim} claimed, ${counted.lapse} lapsed${open.length ? `, ${open.length} still open` : ''}. Runs start over at each match, and nobody is marked while the server's samples show fewer than ${c.minPlayers} on.${
+				bountyPick(c) === 'top'
+					? " A side's top killers are counted from the kills the feed stored, from each match's start."
+					: bountyPick(c) === 'manual'
+						? ' A named player counts as on from their first kill or death in a match until their session closes.'
+						: ''
+			}`
 		);
 		if (rows.length >= KILL_RATE_REPLAY_MAX)
 			result.notes.push(
