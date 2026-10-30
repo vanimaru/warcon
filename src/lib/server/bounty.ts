@@ -26,7 +26,11 @@ export const BOUNTY_REWARD = 'bounty_reward';
 export const BOUNTY_CLAIM = 'bounty_claim';
 export const BOUNTY_LAPSE = 'bounty_lapse';
 
-export type BountyReward = 'slot' | 'none';
+/**
+ * What a claim earns: the claimer a reserved slot, nothing but the announcement, or a point for the
+ * claimer's side, the first side to `winClaims` winning the match (the rule ends it).
+ */
+export type BountyReward = 'slot' | 'none' | 'win';
 /** Who gets a bounty: a run that reaches the count, each side's top killers, or players named. */
 export type BountyPick = 'streak' | 'top' | 'manual';
 export const BOUNTY_MAX_PER_FACTION = 3;
@@ -53,6 +57,10 @@ export interface BountyConfig {
 	/** nobody is marked while fewer than this many are on */
 	minPlayers: number;
 	reward: BountyReward;
+	/** with reward 'win': the bounties a side claims in a match to win it, 1 to 100 */
+	winClaims: number;
+	/** with reward 'win': broadcast as a side wins, before the match is ended; '' for none */
+	winMessage: string;
 	/** how long the claimer's reserved slot lasts */
 	slotDays: number;
 	scope: BountyScope;
@@ -74,20 +82,29 @@ export const BOUNTY_TOP_MESSAGE_PLAIN =
 	'BOUNTY on {name} of {faction}: {streak} kills, the most on their side. Who takes them down?';
 export const BOUNTY_MANUAL_MESSAGE = 'BOUNTY on {name} of {faction}. Kill them for {reward}.';
 export const BOUNTY_MANUAL_MESSAGE_PLAIN = 'BOUNTY on {name} of {faction}. Who takes them down?';
+export const BOUNTY_WIN_ASK = 'First side to {goal} bounties wins the match!';
+export const BOUNTY_WIN_MESSAGE = '{winner} wins the bounty hunt with {claims} bounties claimed!';
+export const BOUNTY_MAX_WIN_CLAIMS = 100;
 
 /** The announcement a rule without its own gets, by pick and reward. */
-export const bountySetDefault = (pick: BountyPick, reward: BountyReward): string =>
-	pick === 'top'
-		? reward === 'slot'
-			? BOUNTY_TOP_MESSAGE
-			: BOUNTY_TOP_MESSAGE_PLAIN
-		: pick === 'manual'
-			? reward === 'slot'
-				? BOUNTY_MANUAL_MESSAGE
-				: BOUNTY_MANUAL_MESSAGE_PLAIN
-			: reward === 'slot'
-				? BOUNTY_SET_MESSAGE
+export function bountySetDefault(pick: BountyPick, reward: BountyReward): string {
+	const plain =
+		pick === 'top'
+			? BOUNTY_TOP_MESSAGE_PLAIN
+			: pick === 'manual'
+				? BOUNTY_MANUAL_MESSAGE_PLAIN
 				: BOUNTY_SET_MESSAGE_PLAIN;
+	const slot =
+		pick === 'top'
+			? BOUNTY_TOP_MESSAGE
+			: pick === 'manual'
+				? BOUNTY_MANUAL_MESSAGE
+				: BOUNTY_SET_MESSAGE;
+	if (reward === 'slot') return slot;
+	if (reward === 'none') return plain;
+	// the question the plain text ends on gives way to the race
+	return plain.replace(/ (Who ends the run\?|Who takes them down\?)$/, ` ${BOUNTY_WIN_ASK}`);
+}
 
 /** A rule's pick, 'streak' for one saved before picks existed. */
 export const bountyPick = (c: unknown): BountyPick => {
@@ -100,8 +117,10 @@ const STEAM_ID = /^\d{17}$/;
 /** What a rule's reward needs of whoever saves it: a slot here, or on the organisation's list. */
 export const bountyScope = (c: unknown): BountyScope =>
 	c && typeof c === 'object' && (c as Record<string, unknown>).scope === 'org' ? 'org' : 'server';
-export const bountyReward = (c: unknown): BountyReward =>
-	c && typeof c === 'object' && (c as Record<string, unknown>).reward === 'none' ? 'none' : 'slot';
+export const bountyReward = (c: unknown): BountyReward => {
+	const v = c && typeof c === 'object' ? (c as Record<string, unknown>).reward : undefined;
+	return v === 'none' || v === 'win' ? v : 'slot';
+};
 
 export function validateBounty(c: Record<string, unknown>): BountyConfig {
 	const reward = bountyReward(c);
@@ -127,6 +146,8 @@ export function validateBounty(c: Record<string, unknown>): BountyConfig {
 		wanted,
 		minPlayers: int(c.minPlayers, 20, 0, 1000),
 		reward,
+		winClaims: int(c.winClaims, 5, 1, BOUNTY_MAX_WIN_CLAIMS),
+		winMessage: c.winMessage === undefined ? BOUNTY_WIN_MESSAGE : str(c.winMessage, MAX_CHAT),
 		slotDays: int(c.slotDays, 1, 1, 365),
 		scope: bountyScope(c),
 		setMessage: str(c.setMessage, MAX_CHAT) || bountySetDefault(pick, reward),
@@ -138,8 +159,14 @@ export function validateBounty(c: Record<string, unknown>): BountyConfig {
 const days = (n: number) => `${n} day${n === 1 ? '' : 's'}`;
 
 /** The reward in words, for `{reward}` and the panel's own lines; '' for none. */
-export const rewardWords = (cfg: Pick<BountyConfig, 'reward' | 'slotDays'>): string =>
-	cfg.reward === 'slot' ? `a reserved slot for ${days(cfg.slotDays)}` : '';
+export const rewardWords = (
+	cfg: Pick<BountyConfig, 'reward' | 'slotDays'> & Partial<Pick<BountyConfig, 'winClaims'>>
+): string =>
+	cfg.reward === 'slot'
+		? `a reserved slot for ${days(cfg.slotDays)}`
+		: cfg.reward === 'win'
+			? `a point for their side (${cfg.winClaims ?? 5} wins the match)`
+			: '';
 
 /** One player of a kill as the rule reads them. */
 export interface BountyPlayer {
@@ -174,23 +201,45 @@ export interface OpenBounty extends BountyPlayer {
 	how: BountyPick;
 }
 
-/** A rule's runs, its open bounties, and who has had one claimed this match. */
+/** A rule's runs, its open bounties, who has had one claimed this match, and each side's claims. */
 export interface BountyTrack {
 	runs: Map<string, number>;
 	open: OpenBounty[];
 	/** players whose bounty was claimed this match: the top and named picks pass them over */
 	claimed: Set<string>;
+	/** the bounties each side has claimed this match (reward 'win') */
+	wins: Map<string, number>;
+	/** a side has won this match (reward 'win'): nobody more is marked until the next */
+	decided: boolean;
 }
 
 export const newBountyTrack = (): BountyTrack => ({
 	runs: new Map(),
 	open: [],
-	claimed: new Set()
+	claimed: new Set(),
+	wins: new Map(),
+	decided: false
 });
 
 export type BountyEvent =
 	| { kind: 'set'; bounty: OpenBounty; kill: BountyKill }
-	| { kind: 'claim'; bounty: OpenBounty; claimer: BountyPlayer; kill: BountyKill };
+	| {
+			kind: 'claim';
+			bounty: OpenBounty;
+			claimer: BountyPlayer;
+			kill: BountyKill;
+			/** the claimer's side's claims this match, this one counted */
+			sideClaims: number;
+	  }
+	| { kind: 'win'; faction: string; claims: number; claimer: BountyPlayer; kill: BountyKill };
+
+/** A match over: runs, the claimed, each side's claims and the win start over. */
+export function newMatch(track: BountyTrack): void {
+	track.runs.clear();
+	track.claimed.clear();
+	track.wins.clear();
+	track.decided = false;
+}
 
 /** A kill that adds to the killer's run: of another player, not a team kill or a suicide. */
 const scores = (k: BountyKill): boolean =>
@@ -215,7 +264,7 @@ export const claims = (k: BountyKill, open: Pick<OpenBounty, 'steamId'>): boolea
  * (bountyPicks); kills only claim theirs. Moves `track` on and returns what happened.
  */
 export function bountyStep(
-	cfg: Pick<BountyConfig, 'streak'> & Partial<Pick<BountyConfig, 'pick'>>,
+	cfg: Pick<BountyConfig, 'streak'> & Partial<Pick<BountyConfig, 'pick' | 'reward' | 'winClaims'>>,
 	track: BountyTrack,
 	inOrder: BountyKill[],
 	at: { canMark: boolean; now: number }
@@ -227,7 +276,19 @@ export function bountyStep(
 		if (i >= 0) {
 			const [b] = track.open.splice(i, 1);
 			track.claimed.add(b.steamId);
-			out.push({ kind: 'claim', bounty: b, claimer: k.killer!, kill: k });
+			// claims() asks for the claimer's side
+			const side = k.killer!.faction!;
+			const sideClaims = (track.wins.get(side) ?? 0) + 1;
+			track.wins.set(side, sideClaims);
+			out.push({ kind: 'claim', bounty: b, claimer: k.killer!, kill: k, sideClaims });
+			if (
+				bountyReward(cfg) === 'win' &&
+				!track.decided &&
+				sideClaims >= Math.max(1, cfg.winClaims ?? 5)
+			) {
+				track.decided = true;
+				out.push({ kind: 'win', faction: side, claims: sideClaims, claimer: k.killer!, kill: k });
+			}
 		}
 		track.runs.delete(k.victim.steamId);
 		if (!scores(k)) continue;
@@ -236,7 +297,7 @@ export function bountyStep(
 		track.runs.set(killer.steamId, run);
 		const mine = track.open.find((o) => o.steamId === killer.steamId);
 		if (mine) mine.best = Math.max(mine.best, run);
-		else if (streak && !track.open.length && at.canMark && run >= cfg.streak) {
+		else if (streak && !track.decided && !track.open.length && at.canMark && run >= cfg.streak) {
 			const b: OpenBounty = {
 				steamId: killer.steamId,
 				name: killer.name || killer.steamId,
@@ -273,7 +334,7 @@ export function bountyPicks(
 	at: { canMark: boolean; now: number }
 ): OpenBounty[] {
 	const pick = bountyPick(cfg);
-	if (pick === 'streak' || !at.canMark) return [];
+	if (pick === 'streak' || !at.canMark || track.decided) return [];
 	const per = Math.min(BOUNTY_MAX_PER_FACTION, Math.max(1, cfg.perFaction ?? 1));
 	const sideOf = new Map(players.map((p) => [p.steamId, p.faction]));
 	const onSide = new Map<string, number>();
@@ -357,13 +418,16 @@ export const bountyVersion = (row: { config: unknown; updatedAt: Date | null }):
 	`${settingsFingerprint(row.config)}:${row.updatedAt?.getTime() ?? 0}`;
 
 /**
- * The rule's state as written to its row, under the version it was set in: the open bounties and who
- * has had one claimed this match. A row written before there could be several holds `open` alone.
+ * The rule's state as written to its row, under the version it was set in: the open bounties, who
+ * has had one claimed this match, each side's claims and whether a side has won. A row written
+ * before there could be several holds `open` alone.
  */
 export interface BountyState {
 	version: string;
 	bounties: OpenBounty[];
 	claimed: string[];
+	wins: Record<string, number>;
+	decided: boolean;
 	/** the one open bounty of a row written before there could be several */
 	open?: OpenBounty | null;
 }
@@ -385,29 +449,42 @@ const savedOne = (o: unknown): OpenBounty | null => {
 		: null;
 };
 
-/** The open bounties and the claimed a row's saved state holds for this version. */
+/** What a row's saved state holds for this version: nothing for another. */
 export function savedBounties(
 	state: unknown,
 	version: string
-): { open: OpenBounty[]; claimed: string[] } {
+): { open: OpenBounty[]; claimed: string[]; wins: Map<string, number>; decided: boolean } {
 	const s = state as Partial<BountyState> | null;
-	if (!s || typeof s !== 'object' || s.version !== version) return { open: [], claimed: [] };
+	if (!s || typeof s !== 'object' || s.version !== version)
+		return { open: [], claimed: [], wins: new Map(), decided: false };
 	const list = Array.isArray(s.bounties) ? s.bounties : s.open ? [s.open] : [];
+	const wins = new Map<string, number>();
+	if (s.wins && typeof s.wins === 'object')
+		for (const [f, n] of Object.entries(s.wins)) if (Number(n) > 0) wins.set(f, Number(n));
 	return {
 		open: list.map(savedOne).filter((b): b is OpenBounty => !!b),
-		claimed: Array.isArray(s.claimed) ? s.claimed.filter((x) => typeof x === 'string') : []
+		claimed: Array.isArray(s.claimed) ? s.claimed.filter((x) => typeof x === 'string') : [],
+		wins,
+		decided: s.decided === true
 	};
 }
 
 export const bountyState = (
 	version: string,
 	open: OpenBounty[],
-	claimed: Iterable<string> = []
+	claimed: Iterable<string> = [],
+	match: { wins?: ReadonlyMap<string, number>; decided?: boolean } = {}
 ): BountyState => ({
 	version,
 	bounties: open.map((b) => ({ ...b })),
-	claimed: [...claimed]
+	claimed: [...claimed],
+	wins: Object.fromEntries(match.wins ?? []),
+	decided: !!match.decided
 });
+
+/** A track's state for its row. */
+export const trackState = (version: string, t: BountyTrack): BountyState =>
+	bountyState(version, t.open, t.claimed, t);
 
 /**
  * Each Bounty rule's runs and open bounty in this process's memory, by server and rule. The open
@@ -432,7 +509,13 @@ export function bountyTrack(row: {
 		const saved = savedBounties(row.state, version);
 		m = {
 			version,
-			track: { runs: new Map(), open: saved.open, claimed: new Set(saved.claimed) }
+			track: {
+				runs: new Map(),
+				open: saved.open,
+				claimed: new Set(saved.claimed),
+				wins: saved.wins,
+				decided: saved.decided
+			}
 		};
 		mine.set(row.id, m);
 	}
@@ -469,6 +552,7 @@ export type BountyReplayEvent =
 	| { kind: 'left'; at: number; steamId: string };
 
 export type BountyOutcome =
+	| { kind: 'win'; at: number; faction: string; claims: number; claimer: BountyPlayer }
 	| { kind: 'set'; at: number; bounty: OpenBounty; players: number }
 	| { kind: 'claim'; at: number; bounty: OpenBounty; claimer: BountyPlayer }
 	| { kind: 'lapse'; at: number; bounty: OpenBounty; why: BountyLapse };
@@ -482,7 +566,9 @@ export type BountyOutcome =
  */
 export function bountyReplay(
 	cfg: Pick<BountyConfig, 'streak' | 'minPlayers'> &
-		Partial<Pick<BountyConfig, 'pick' | 'perFaction' | 'minKills' | 'wanted'>>,
+		Partial<
+			Pick<BountyConfig, 'pick' | 'perFaction' | 'minKills' | 'wanted' | 'reward' | 'winClaims'>
+		>,
 	events: BountyReplayEvent[]
 ): { outcomes: BountyOutcome[]; open: OpenBounty[] } {
 	const track = newBountyTrack();
@@ -502,8 +588,7 @@ export function bountyReplay(
 		}
 		if (match !== null && e.match !== match) {
 			lapse(e.at, 'match', () => true);
-			track.runs.clear();
-			track.claimed.clear();
+			newMatch(track);
 			seen.clear();
 		}
 		match = e.match;
@@ -512,7 +597,9 @@ export function bountyReplay(
 			outcomes.push(
 				x.kind === 'set'
 					? { kind: 'set', at: e.at, bounty: { ...x.bounty }, players: e.players }
-					: { kind: 'claim', at: e.at, bounty: { ...x.bounty }, claimer: x.claimer }
+					: x.kind === 'claim'
+						? { kind: 'claim', at: e.at, bounty: { ...x.bounty }, claimer: x.claimer }
+						: { kind: 'win', at: e.at, faction: x.faction, claims: x.claims, claimer: x.claimer }
 			);
 		if (!picks) continue;
 		for (const k of e.kills) {

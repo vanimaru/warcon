@@ -277,7 +277,7 @@ export function buildTeamKillEmbed(appName: string, serverName: string, k: KillV
 
 const WATCHED_COLOR = 0x5b8def;
 
-const BOUNTY_COLORS = { set: 0xd4a843, claim: 0x7bc462, lapse: 0x8a8a90 } as const;
+const BOUNTY_COLORS = { set: 0xd4a843, claim: 0x7bc462, lapse: 0x8a8a90, win: 0x5b9bd5 } as const;
 
 /** A bounty as a Bounties channel shows it: for players, so names only, never a SteamID. */
 export type BountyCard = {
@@ -295,6 +295,7 @@ export type BountyCard = {
 	| { kind: 'set'; name: string; faction: string | null; streak: number }
 	| { kind: 'claim'; claimer: string; target: string; run: number }
 	| { kind: 'lapse'; name: string; run: number; why: BountyLapse }
+	| { kind: 'win'; winner: string; claims: number }
 );
 
 /** One bounty set, claimed or lapsed as an embed: who, the run, the reward, where. */
@@ -304,43 +305,48 @@ export function buildBountyEmbed(appName: string, serverName: string, c: BountyC
 		: '';
 	const where = `${plain(serverName, 80)}${c.map ? ` · ${plain(mapName(c.map), 40)}` : ''}`;
 	const card =
-		c.kind === 'set'
+		c.kind === 'win'
 			? {
-					// the name goes in the body, where it is escaped like every other name (titles are not)
-					title: 'Bounty set',
-					lines: [
-						`**${plain(c.name, 60)}**: ${
-							c.how === 'top'
-								? `${c.streak} kills, the most on their side`
-								: c.how === 'manual'
-									? 'a wanted player'
-									: `${c.streak} kills without dying`
-						}${c.faction ? `, for ${plain(c.faction, 30)}` : ''}`,
-						reward
-					]
+					title: 'Bounty hunt won',
+					lines: [`**${plain(c.winner, 30)}** claimed ${c.claims} bounties and wins the match`]
 				}
-			: c.kind === 'claim'
+			: c.kind === 'set'
 				? {
-						title: 'Bounty claimed',
+						// the name goes in the body, where it is escaped like every other name (titles are not)
+						title: 'Bounty set',
 						lines: [
-							c.how && c.how !== 'streak'
-								? `**${plain(c.claimer, 60)}** took down **${plain(c.target, 60)}**`
-								: `**${plain(c.claimer, 60)}** ended **${plain(c.target, 60)}**'s run at ${c.run}`,
+							`**${plain(c.name, 60)}**: ${
+								c.how === 'top'
+									? `${c.streak} kills, the most on their side`
+									: c.how === 'manual'
+										? 'a wanted player'
+										: `${c.streak} kills without dying`
+							}${c.faction ? `, for ${plain(c.faction, 30)}` : ''}`,
 							reward
 						]
 					}
-				: {
-						title: 'Bounty lapsed',
-						lines: [
-							c.how && c.how !== 'streak'
-								? c.why === 'left'
-									? `**${plain(c.name, 60)}** left the server`
-									: `The match ended with **${plain(c.name, 60)}** still wanted`
-								: c.why === 'left'
-									? `**${plain(c.name, 60)}** left the server on a run of ${c.run}`
-									: `The match ended with **${plain(c.name, 60)}** on a run of ${c.run}`
-						]
-					};
+				: c.kind === 'claim'
+					? {
+							title: 'Bounty claimed',
+							lines: [
+								c.how && c.how !== 'streak'
+									? `**${plain(c.claimer, 60)}** took down **${plain(c.target, 60)}**`
+									: `**${plain(c.claimer, 60)}** ended **${plain(c.target, 60)}**'s run at ${c.run}`,
+								reward
+							]
+						}
+					: {
+							title: 'Bounty lapsed',
+							lines: [
+								c.how && c.how !== 'streak'
+									? c.why === 'left'
+										? `**${plain(c.name, 60)}** left the server`
+										: `The match ended with **${plain(c.name, 60)}** still wanted`
+									: c.why === 'left'
+										? `**${plain(c.name, 60)}** left the server on a run of ${c.run}`
+										: `The match ended with **${plain(c.name, 60)}** on a run of ${c.run}`
+							]
+						};
 	return {
 		title: card.title,
 		description: clip([...card.lines, where].filter(Boolean).join('\n'), 2000),

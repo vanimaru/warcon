@@ -216,7 +216,9 @@
 			case 'bounty':
 				return !data.feed
 					? 'Needs the kill feed, which is off on this server. Turn it on under Config.'
-					: !canChat
+					: form?.kind === 'bounty' && form.bountyReward === 'win' && !canMatch
+						? 'Saving needs the Match control capability as well as Automation: the rule ends the match for the side that wins.'
+						: !canChat
 						? 'Saving needs the Chat capability as well as Automation: the bounty is announced to the server.'
 						: '';
 			case 'empty_reset':
@@ -373,8 +375,9 @@
 	 * A Bounty rule's texts until they are written, by who it marks and its reward: a slot is named,
 	 * an announcement-only rule asks.
 	 */
-	const bountyTexts = (reward: 'slot' | 'none', pick: BountyPickForm = 'streak') => {
+	const bountyTexts = (reward: Form['bountyReward'], pick: BountyPickForm = 'streak') => {
 		const slot = reward === 'slot';
+		const win = reward === 'win';
 		const set =
 			pick === 'top'
 				? '{name} of {faction}: {streak} kills, the most on their side.'
@@ -385,23 +388,33 @@
 		const claim =
 			pick === 'streak' ? "{name} ended {target}'s run of {streak}" : '{name} took down {target}';
 		return {
-			setMessage: `BOUNTY on ${set} ${slot ? 'Kill them for {reward}.' : ask}`,
-			claimMessage: slot ? `${claim} and takes {reward}.` : `${claim}.`,
+			setMessage: `BOUNTY on ${set} ${
+				slot
+					? 'Kill them for {reward}.'
+					: win
+						? 'First side to {goal} bounties wins the match!'
+						: ask
+			}`,
+			claimMessage: slot
+				? `${claim} and takes {reward}.`
+				: win
+					? `${claim}: {claims} of {goal} for {faction}.`
+					: `${claim}.`,
 			whisper: slot ? 'Bounty claimed. Your reserved slot lasts until {until}.' : ''
 		};
 	};
 	/** Switching the reward or the pick swaps the texts still as the rule began them. */
-	const swapBounty = (
-		f: Form,
-		was: { reward?: Form['bountyReward']; pick?: BountyPickForm } = {}
-	) => {
-		const from = bountyTexts(
-			was.reward ?? (f.bountyReward === 'slot' ? 'none' : 'slot'),
-			was.pick ?? f.bountyPick
-		);
+	const swapBounty = (f: Form, was: { reward?: Form['bountyReward']; pick?: BountyPickForm }) => {
+		const from = bountyTexts(was.reward ?? f.bountyReward, was.pick ?? f.bountyPick);
 		const to = bountyTexts(f.bountyReward, f.bountyPick);
 		for (const k of ['setMessage', 'claimMessage', 'whisper'] as const)
 			if (f[k] === from[k]) f[k] = to[k];
+	};
+	/** A Bounty rule's reward switched, its texts still as the rule began them swapped with it. */
+	const rewardTo = (f: Form, reward: Form['bountyReward']) => {
+		const was = f.bountyReward;
+		f.bountyReward = reward;
+		swapBounty(f, { reward: was });
 	};
 	/** A Bounty rule's named player added from who is on, or by SteamID64. */
 	const addWanted = (f: Form, steamId: string, name = '') => {
@@ -578,7 +591,10 @@
 		stopAt: number;
 		doneMessage: string;
 		streak: number;
-		bountyReward: 'slot' | 'none';
+		bountyReward: 'slot' | 'none' | 'win';
+		/** a Bounty rule's claims for a side to win the match (reward 'win'), and what it announces */
+		winClaims: number;
+		winMessage: string;
 		/** a Bounty rule's pick, its bounties on each side at once, the top's kills, the named */
 		bountyPick: BountyPickForm;
 		perFaction: number;
@@ -772,7 +788,11 @@
 							: 'kick';
 		// a new Bounty rule gives a slot when its author may reserve one, and announces only otherwise
 		const bountyReward: Form['bountyReward'] =
-			c.reward === 'none' || (!t && !canSlotHere && !canSlotOrg) ? 'none' : 'slot';
+			c.reward === 'win'
+				? 'win'
+				: c.reward === 'none' || (!t && !canSlotHere && !canSlotOrg)
+					? 'none'
+					: 'slot';
 		const bountyPick: BountyPickForm =
 			c.pick === 'top' || c.pick === 'manual' ? c.pick : 'streak';
 		form = {
@@ -916,6 +936,8 @@
 			streak: n('streak', 15),
 			bountyReward,
 			bountyPick,
+			winClaims: n('winClaims', 5),
+			winMessage: s('winMessage', '{winner} wins the bounty hunt with {claims} bounties claimed!'),
 			perFaction: n('perFaction', 1),
 			minKills: n('minKills', 5),
 			wanted: Array.isArray(c.wanted)
@@ -1163,6 +1185,8 @@
 					streak: Number(f.streak),
 					minPlayers: Number(f.minPlayers),
 					reward: f.bountyReward,
+					winClaims: Number(f.winClaims),
+					winMessage: f.winMessage,
 					slotDays: Number(f.slotDays),
 					scope: f.slotScope,
 					setMessage: f.setMessage,
@@ -1501,7 +1525,9 @@
 							: `${c.streak} kills without dying, with ${c.minPlayers}+ on`,
 					c.reward === 'none'
 						? 'announced only'
-						: `reserved slot ${c.scope === 'org' ? 'on every server' : 'here'} for ${days} day${days === 1 ? '' : 's'}`,
+						: c.reward === 'win'
+							? `the first side to claim ${c.winClaims} wins the match`
+							: `reserved slot ${c.scope === 'org' ? 'on every server' : 'here'} for ${days} day${days === 1 ? '' : 's'}`,
 					c.claimMessage ? 'announces the claim' : '',
 					c.whisper ? 'whispers the claimer' : ''
 				]
@@ -3841,10 +3867,11 @@
 								class="flex items-center gap-2 {canSlotHere || canSlotOrg ? '' : 'text-mist-600'}"
 								><input
 									type="radio"
-									bind:group={f.bountyReward}
+									name="bounty-reward"
 									value="slot"
+									checked={f.bountyReward === 'slot'}
 									disabled={!canSlotHere && !canSlotOrg}
-									onchange={() => swapBounty(f)}
+									onchange={() => rewardTo(f, 'slot')}
 								/> A reserved slot for</label
 							>
 							<input
@@ -3882,12 +3909,38 @@
 								/> on every server in the organisation</label
 							>
 						</div>
+						<div class="flex flex-wrap items-center gap-2">
+							<label class="flex items-center gap-2 {canMatch ? '' : 'text-mist-600'}"
+								><input
+									type="radio"
+									name="bounty-reward"
+									value="win"
+									checked={f.bountyReward === 'win'}
+									disabled={!canMatch}
+									onchange={() => rewardTo(f, 'win')}
+								/> A point for their side: the first side to claim</label
+							>
+							<input
+								class="input w-20 text-right"
+								type="number"
+								min="1"
+								max="100"
+								bind:value={f.winClaims}
+								aria-label="Bounties a side claims to win the match"
+								disabled={f.bountyReward !== 'win'}
+							/>
+							bounties of the other sides wins, and the match is ended
+						</div>
+						{#if !canMatch}
+							<p class="pl-5 text-[12px] text-mist-600">Ending the match needs Match control.</p>
+						{/if}
 						<label class="flex items-center gap-2"
 							><input
 								type="radio"
-								bind:group={f.bountyReward}
+								name="bounty-reward"
 								value="none"
-								onchange={() => swapBounty(f)}
+								checked={f.bountyReward === 'none'}
+								onchange={() => rewardTo(f, 'none')}
 							/> Nothing but the announcement</label
 						>
 					</fieldset>
@@ -3912,6 +3965,23 @@
 							aria-label="Announce the claim"
 						/>
 					</fieldset>
+					{#if f.bountyReward === 'win'}
+						<fieldset class="space-y-2">
+							<legend class="field-label">Announce the win, blank for none</legend>
+							<input
+								class="input"
+								type="text"
+								bind:value={f.winMessage}
+								maxlength={MAX_CHAT}
+								aria-label="Announce the win"
+							/>
+							<p class="text-[12px] text-mist-600">
+								Sent as a side reaches the count, just before the panel ends the match.
+								{'{winner}'} is the side, {'{claims}'} its claims, {'{name}'} the player whose claim
+								won it. Claims count per match, so each match is a new hunt.
+							</p>
+						</fieldset>
+					{/if}
 					<fieldset class="space-y-2">
 						<legend class="field-label">Whisper the claimer, blank for none</legend>
 						<input
@@ -3922,14 +3992,21 @@
 							aria-label="Whisper the claimer"
 						/>
 					</fieldset>
-					{@render placeholders('bounty', [f.setMessage, f.claimMessage, f.whisper])}
+					{@render placeholders('bounty', [
+						f.setMessage,
+						f.claimMessage,
+						f.whisper,
+						f.bountyReward === 'win' ? f.winMessage : ''
+					])}
 					<p class="note">
 						{'{name}'} is the marked player when the bounty is set and the claimer after;
 						{'{target}'} is always the marked player, {'{streak}'} {f.bountyPick === 'streak'
 							? 'their run'
 							: 'their kills in the match when marked'}, {'{faction}'} their side{#if f.bountyReward === 'slot'},
 							{'{reward}'} “a reserved slot for {Number(f.slotDays)}
-							day{Number(f.slotDays) === 1 ? '' : 's'}”{/if}. The bounty and the claim are broadcast
+							day{Number(f.slotDays) === 1 ? '' : 's'}”{:else if f.bountyReward === 'win'},
+							{'{goal}'} the {Number(f.winClaims)} claims a side needs, {'{claims}'} the claimer's side's
+							so far{/if}. The bounty and the claim are broadcast
 						to the whole server.
 					</p>
 					<p class="note">

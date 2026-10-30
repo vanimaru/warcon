@@ -98,9 +98,11 @@ export const MESSAGE_RULES: Readonly<Partial<Record<TriggerKind, MessageRule>>> 
 	name_change: { fields: ['reason'], own: ['previous'], player: true },
 	// said to the whole server, so no org-wide stats: `{name}` is the marked player when the bounty is
 	// set and the claimer after, `{target}` always the marked player
+	// with the win reward: `{goal}` the claims a side needs, `{claims}` the claimer's side's so far,
+	// `{winner}` the side that won (in the win message)
 	bounty: {
-		fields: ['setMessage', 'claimMessage', 'whisper'],
-		own: ['target', 'streak', 'reward', 'days', 'until'],
+		fields: ['setMessage', 'claimMessage', 'whisper', 'winMessage'],
+		own: ['target', 'streak', 'reward', 'days', 'until', 'goal', 'claims', 'winner'],
 		player: true,
 		kept: true
 	},

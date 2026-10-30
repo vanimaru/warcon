@@ -186,11 +186,12 @@ import {
 	bountyReplay,
 	bountyReward,
 	bountyScope,
-	bountyState,
 	bountyTrack,
 	forgetBounties,
 	bountyPick,
 	bountyPicks,
+	newMatch,
+	trackState,
 	lapseWords,
 	runWords,
 	rewardWords,
@@ -403,10 +404,14 @@ export function ruleNeeds(kind: TriggerKind, config: unknown): [Capability, stri
 		return SLOT_NEEDS[
 			(config as Partial<SeedRewardConfig> | null)?.scope !== 'server' ? 'org' : 'server'
 		];
-	if (kind === 'bounty')
-		return bountyReward(config) === 'slot'
+	if (kind === 'bounty') {
+		const reward = bountyReward(config);
+		return reward === 'slot'
 			? SLOT_NEEDS[bountyScope(config)]
-			: ['chat.send', 'messages players'];
+			: reward === 'win'
+				? ['match.control', 'ends the match for the side that claims enough bounties']
+				: ['chat.send', 'messages players'];
+	}
 	if (kind === 'kill_distance') {
 		const action = killDistanceAction(config);
 		if (action === 'ban') return banNeeds(killDistanceBanScope(config));
@@ -427,7 +432,7 @@ export function ruleNeeds(kind: TriggerKind, config: unknown): [Capability, stri
 function ruleAlsoNeeds(kind: TriggerKind, config: unknown): [Capability, string] | null {
 	if (kind === 'kill_distance' && killDistanceAction(config) === 'kill') return RULE_KILL_NEEDS[1];
 	if (kind === 'afk_watch' && afkWatchWarns(config)) return ['chat.send', 'whispers players'];
-	if (kind === 'bounty' && bountyReward(config) === 'slot')
+	if (kind === 'bounty' && bountyReward(config) !== 'none')
 		return ['chat.send', 'messages players'];
 	if (kind === 'two_teams' && str((config as Partial<TwoTeamsConfig> | null)?.message))
 		return ['chat.send', 'whispers players'];
@@ -2435,8 +2440,10 @@ async function evalBounty(
 	read: StatsReader
 ) {
 	const { version, track } = bountyTrack(row);
-	if (ctx.matchEnd || ctx.recovered) track.runs.clear();
-	if (ctx.matchEnd) track.claimed.clear();
+	if (ctx.recovered) track.runs.clear();
+	// a new match: runs, the claimed, each side's claims and the win start over, written to the row
+	const fresh = !!ctx.matchEnd && (track.wins.size > 0 || track.decided || track.claimed.size > 0);
+	if (ctx.matchEnd) newMatch(track);
 	const lapsed: { open: OpenBounty; why: BountyLapse }[] = [];
 	for (const open of track.open) {
 		const why: BountyLapse | null = ctx.matchEnd
@@ -2465,7 +2472,14 @@ async function evalBounty(
 					{ canMark: on >= cfg.minPlayers, now }
 				)
 			: [];
-	if (!lapsed.length && !picked.length) return;
+	if (!lapsed.length && !picked.length) {
+		if (fresh) {
+			const state = trackState(version, track);
+			row.state = state;
+			out.updates.push({ id: row.id, state });
+		}
+		return;
+	}
 	const map = ctx.matchEnd?.map ?? ctx.status.map;
 	const cards: BountyCard[] = [];
 	for (const { open, why } of lapsed) {
@@ -2494,7 +2508,8 @@ async function evalBounty(
 						streak: b.streak,
 						reward,
 						days: slot ? cfg.slotDays : '',
-						until
+						until,
+						goal: cfg.reward === 'win' ? cfg.winClaims : ''
 					})
 				),
 				MAX_CHAT
@@ -2530,7 +2545,7 @@ async function evalBounty(
 		}
 	}
 	// the open bounties as they stand, on the last update (they are applied in order)
-	const state = bountyState(version, track.open, track.claimed);
+	const state = trackState(version, track);
 	row.state = state;
 	out.updates[out.updates.length - 1].state = state;
 	const serverName = ctx.status.serverName || ctx.server.name;
@@ -3405,10 +3420,19 @@ export async function dryRun(
 		const reward = rewardWords(c);
 		const slot = c.reward === 'slot';
 		const counted = { set: 0, claim: 0, lapse: 0 };
+		let won = 0;
 		for (const o of outcomes) {
 			if (o.at < from.getTime()) continue;
-			counted[o.kind]++;
 			const at = new Date(o.at);
+			if (o.kind === 'win') {
+				won++;
+				note(
+					at,
+					`${o.faction} wins the bounty hunt with ${o.claims} claimed (${o.claimer.name || o.claimer.steamId}'s claim): the match would be ended`
+				);
+				continue;
+			}
+			counted[o.kind]++;
 			const b = o.bounty;
 			if (o.kind === 'set') {
 				const v = keptVars(
@@ -3420,7 +3444,8 @@ export async function dryRun(
 							streak: b.streak,
 							reward,
 							days: slot ? c.slotDays : '',
-							until: slot ? dateOf(new Date(o.at + c.slotDays * 86400_000)) : ''
+							until: slot ? dateOf(new Date(o.at + c.slotDays * 86400_000)) : '',
+							goal: c.reward === 'win' ? c.winClaims : ''
 						}
 					)
 				);
@@ -3457,7 +3482,7 @@ export async function dryRun(
 			);
 		const n = (x: number, one: string, many = `${one}s`) => `${x} ${x === 1 ? one : many}`;
 		result.notes.push(
-			`${n(counted.set, 'bounty', 'bounties')} set, ${counted.claim} claimed, ${counted.lapse} lapsed${open.length ? `, ${open.length} still open` : ''}. Runs start over at each match, and nobody is marked while the server's samples show fewer than ${c.minPlayers} on.${
+			`${n(counted.set, 'bounty', 'bounties')} set, ${counted.claim} claimed, ${counted.lapse} lapsed${open.length ? `, ${open.length} still open` : ''}${c.reward === 'win' ? `, ${n(won, 'match', 'matches')} won by a side's ${c.winClaims} claims` : ''}. Runs start over at each match, and nobody is marked while the server's samples show fewer than ${c.minPlayers} on.${
 				bountyPick(c) === 'top'
 					? " A side's top killers are counted from the kills the feed stored, from each match's start."
 					: bountyPick(c) === 'manual'

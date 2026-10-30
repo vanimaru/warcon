@@ -12,9 +12,11 @@ import {
 	keepBounties,
 	lapseWords,
 	newBountyTrack,
+	newMatch,
 	rewardWords,
 	runWords,
 	savedBounties,
+	trackState,
 	validateBounty,
 	type BountyKill,
 	type BountyPlayer,
@@ -60,6 +62,8 @@ describe('the Bounty rule, settings', () => {
 			wanted: [],
 			minPlayers: 20,
 			reward: 'slot',
+			winClaims: 5,
+			winMessage: '{winner} wins the bounty hunt with {claims} bounties claimed!',
 			slotDays: 1,
 			scope: 'server',
 			setMessage: 'BOUNTY on {name}: {streak} kills without dying. Kill them for {reward}.',
@@ -204,8 +208,13 @@ describe('the Bounty rule, its memory', () => {
 		const version = bountyVersion(row);
 		const open = { ...A, streak: 15, best: 17, setAt: 4000, match: 'm12', how: 'streak' as const };
 		const state = bountyState(version, [open], [B.steamId]);
-		expect(savedBounties(state, version)).toEqual({ open: [open], claimed: [B.steamId] });
-		const none = { open: [], claimed: [] };
+		expect(savedBounties(state, version)).toEqual({
+			open: [open],
+			claimed: [B.steamId],
+			wins: new Map(),
+			decided: false
+		});
+		const none = { open: [], claimed: [], wins: new Map(), decided: false };
 		expect(savedBounties(state, bountyVersion({ ...row, updatedAt: new Date(6000) }))).toEqual(
 			none
 		);
@@ -271,7 +280,14 @@ describe('the Bounty rule, replayed', () => {
 			batch(8, 'm3', [kill(C, D), kill(C, D), kill(C, D), kill(C, D)]),
 			batch(9, 'm3', [kill(A, C)])
 		]);
-		expect(outcomes.map((o) => [o.kind, o.at, o.bounty.steamId, 'why' in o ? o.why : ''])).toEqual([
+		expect(
+			outcomes.map((o) => [
+				o.kind,
+				o.at,
+				'bounty' in o ? o.bounty.steamId : '',
+				'why' in o ? o.why : ''
+			])
+		).toEqual([
 			// too few on at 3; marked at the next kill
 			['set', 4, A.steamId, ''],
 			['lapse', 5, A.steamId, 'match'],
@@ -380,11 +396,77 @@ describe('the Bounty rule, picked by side', () => {
 				batch(4, 'm2', [kill(D, B)])
 			]
 		);
-		expect(outcomes.map((o) => [o.kind, o.at, o.bounty.name])).toEqual([
+		expect(outcomes.map((o) => [o.kind, o.at, 'bounty' in o ? o.bounty.name : o.faction])).toEqual([
 			['set', 2, A.name],
 			['set', 2, B.name],
 			['claim', 3, A.name],
 			['lapse', 4, B.name]
+		]);
+	});
+});
+
+describe('the Bounty rule, a hunt between the sides', () => {
+	const at = { canMark: true, now: 3000 };
+	const cfg = {
+		pick: 'top' as const,
+		perFaction: 3,
+		minKills: 1,
+		streak: 99,
+		reward: 'win' as const,
+		winClaims: 2
+	};
+	const on = (pl: BountyPlayer, kills: number): PickPlayer => ({ ...pl, kills });
+
+	test('the win reward needs a count, says so in its texts and words', () => {
+		const c = validateBounty({ reward: 'win', winClaims: 500, pick: 'top' });
+		expect([c.reward, c.winClaims]).toEqual(['win', 100]);
+		expect(c.setMessage).toContain('First side to {goal} bounties wins the match!');
+		expect(validateBounty({ reward: 'win', winMessage: '' }).winMessage).toBe('');
+		expect(rewardWords({ reward: 'win', slotDays: 1, winClaims: 3 })).toBe(
+			'a point for their side (3 wins the match)'
+		);
+	});
+
+	test("each claim counts for the claimer's side; the side that reaches the count wins, once", () => {
+		const t = fresh();
+		bountyPicks(cfg, t, [on(A, 5), on(D, 4), on(B, 3), on(C, 2)], at);
+		expect(t.open).toHaveLength(4);
+		// BLUE takes A: one for BLUE; RED takes B: one for RED
+		const first = bountyStep(cfg, t, [kill(B, A), kill(A, B)], at);
+		expect(first.map((e) => [e.kind, e.kind === 'claim' ? e.sideClaims : 0])).toEqual([
+			['claim', 1],
+			['claim', 1]
+		]);
+		// BLUE takes D: BLUE's second, and the win
+		const won = bountyStep(cfg, t, [kill(C, D)], at);
+		expect(won.map((e) => e.kind)).toEqual(['claim', 'win']);
+		expect(won[1]).toMatchObject({ kind: 'win', faction: BLUE, claims: 2 });
+		expect(t.decided).toBe(true);
+		// decided: no more wins, and nobody more is marked this match
+		expect(bountyPicks(cfg, t, [on(p(5, RED), 9)], at)).toEqual([]);
+		// the next match starts over
+		newMatch(t);
+		expect([t.wins.size, t.decided, t.claimed.size]).toEqual([0, false, 0]);
+	});
+
+	test("the sides' claims and the win are kept on the row", () => {
+		const t = fresh();
+		t.wins.set(BLUE, 2);
+		t.decided = true;
+		const state = trackState('v1', t);
+		expect(state).toMatchObject({ wins: { [BLUE]: 2 }, decided: true });
+		const back = savedBounties(state, 'v1');
+		expect([back.wins.get(BLUE), back.decided]).toEqual([2, true]);
+	});
+
+	test('the replay tells the win', () => {
+		const { outcomes } = bountyReplay({ ...cfg, minPlayers: 0 }, [
+			{ kind: 'kills', at: 1, match: 'm1', players: 10, kills: [kill(A, B), kill(C, D)] },
+			{ kind: 'kills', at: 2, match: 'm1', players: 10, kills: [kill(B, A), kill(D, C)] },
+			{ kind: 'kills', at: 3, match: 'm1', players: 10, kills: [kill(A, B)] }
+		]);
+		expect(outcomes.filter((o) => o.kind === 'win')).toMatchObject([
+			{ kind: 'win', at: 3, faction: RED, claims: 2 }
 		]);
 	});
 });

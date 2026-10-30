@@ -70,11 +70,12 @@ import { notifyBounty, notifyTeamKills, type BountyCard } from './webhook-delive
 import {
 	BOUNTY_CLAIM,
 	BOUNTY_REWARD,
-	bountyState,
 	fromEarlierMatch,
 	bountyStep,
 	bountyTrack,
+	newMatch,
 	runWords,
+	trackState,
 	keepBounties,
 	rewardWords,
 	type BountyConfig,
@@ -642,6 +643,8 @@ async function actOnBounty(
 		const { version, track } = bountyTrack(row);
 		const before = [...track.open];
 		const claimedBefore = new Set(track.claimed);
+		const winsBefore = new Map(track.wins);
+		const decidedBefore = track.decided;
 		const out: Evaluation = { intents: [], updates: [] };
 		const cards: BountyCard[] = [];
 		// The match this batch was stamped with, read only when a bounty is set or its player dies.
@@ -659,8 +662,7 @@ async function actOnBounty(
 			)
 				continue;
 			track.open = track.open.filter((b) => b !== open);
-			track.runs.clear();
-			track.claimed.clear();
+			newMatch(track);
 			const lapse = bountyLapse(row, cfg, open, 'match', new Date(now), sorted[0].map);
 			out.intents.push(lapse.intent);
 			out.updates.push(lapse.update);
@@ -673,12 +675,15 @@ async function actOnBounty(
 		const reward = rewardWords(cfg);
 		const slot = cfg.reward === 'slot';
 		const until = slot ? dateOf(new Date(now + cfg.slotDays * 86400_000)) : '';
-		const own = (target: string, streak: number, map: string) => ({
+		const goal = cfg.reward === 'win' ? (cfg.winClaims ?? 5) : '';
+		const own = (target: string, streak: number, map: string, claims: number | '' = '') => ({
 			target,
 			streak,
 			reward,
 			days: slot ? cfg.slotDays : '',
 			until,
+			goal,
+			claims,
 			...(map ? { map: mapName(map) } : {})
 		});
 		// said to the whole server, or to the claimer, so no org-wide stats (keptVars)
@@ -686,10 +691,12 @@ async function actOnBounty(
 			events.flatMap((e) =>
 				e.kind === 'set'
 					? [{ steamId: e.bounty.steamId, text: cfg.setMessage }]
-					: [
-							{ steamId: e.claimer.steamId, text: cfg.claimMessage },
-							{ steamId: e.claimer.steamId, text: cfg.whisper }
-						]
+					: e.kind === 'win'
+						? [{ steamId: e.claimer.steamId, text: cfg.winMessage ?? '' }]
+						: [
+								{ steamId: e.claimer.steamId, text: cfg.claimMessage },
+								{ steamId: e.claimer.steamId, text: cfg.whisper }
+							]
 			),
 			{ org: false }
 		);
@@ -699,6 +706,41 @@ async function actOnBounty(
 		for (const e of events) {
 			const k = byEvent.get(e.kill.eventId)!;
 			const dedupe = (what: string) => [row.id, what, k.eventId].join(':');
+			if (e.kind === 'win') {
+				// a side has claimed enough bounties: told, and the match ended (Match control)
+				const won = `${e.faction} won the bounty hunt with ${e.claims} bounties claimed.`;
+				const extra = { ...own('', 0, k.map, e.claims), winner: e.faction };
+				if (cfg.winMessage)
+					out.intents.push({
+						trigger: row,
+						action: 'broadcast',
+						params: { message: say(cfg.winMessage, e.claimer, extra, MAX_CHAT) },
+						target: e.faction,
+						okMessage: `Announced ${e.faction}'s bounty win.`,
+						detail: { winner: e.faction, claims: e.claims, stage: 'win', eventId: k.eventId },
+						steamId: null,
+						dedupeKey: dedupe('win')
+					});
+				out.intents.push({
+					trigger: row,
+					action: 'endMatch',
+					params: {},
+					target: 'match',
+					okMessage: `Ended the match: ${won.slice(0, -1)}.`,
+					detail: { winner: e.faction, claims: e.claims, stage: 'end', eventId: k.eventId },
+					steamId: null,
+					dedupeKey: dedupe('end')
+				});
+				out.updates.push({ id: row.id, lastFiredAt: new Date(now), lastResult: won.slice(0, -1) });
+				cards.push({
+					...card,
+					kind: 'win',
+					map: k.map || null,
+					winner: e.faction,
+					claims: e.claims
+				});
+				continue;
+			}
 			if (e.kind === 'set') {
 				const b = e.bounty;
 				const message = say(cfg.setMessage, b, own(b.name, b.streak, k.map), MAX_CHAT);
@@ -731,7 +773,7 @@ async function actOnBounty(
 			const c = e.claimer;
 			const claimer = c.name || c.steamId;
 			const claimed = `${claimer} claimed the bounty on ${b.name} (${runWords(b)}).`;
-			const extra = own(b.name, b.how === 'streak' ? b.best : b.streak, k.map);
+			const extra = own(b.name, b.how === 'streak' ? b.best : b.streak, k.map, e.sideClaims);
 			out.intents.push({
 				trigger: row,
 				action: BOUNTY_CLAIM,
@@ -804,7 +846,7 @@ async function actOnBounty(
 			});
 		}
 		// The open bounties as they stand after the batch, on the last update (applied in order).
-		const state = bountyState(version, track.open, track.claimed);
+		const state = trackState(version, track);
 		out.updates[out.updates.length - 1].state = state;
 		const after = JSON.stringify(state);
 		let queued = 0;
@@ -815,9 +857,11 @@ async function actOnBounty(
 			});
 		} catch (err) {
 			// Not written: the bounties go back to what they were, unless a look has moved them on since.
-			if (JSON.stringify(bountyState(version, track.open, track.claimed)) === after) {
+			if (JSON.stringify(trackState(version, track)) === after) {
 				track.open = before;
 				track.claimed = claimedBefore;
+				track.wins = winsBefore;
+				track.decided = decidedBefore;
 			}
 			throw err;
 		}

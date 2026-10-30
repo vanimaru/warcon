@@ -1496,6 +1496,27 @@ describe.skipIf(!hasTestDb)('access', () => {
 			expect((await save(unlocks)).status).toBe(409);
 		});
 
+		test('a Bounty rule whose reward is the match needs Match control and Chat', async () => {
+			const w = await seedWorld(env);
+			const params = { id: w.server.id };
+			const holds = (caps: string[]) =>
+				env.db
+					.update(orgRoles)
+					.set({ capabilities: ['server.view', 'automation.manage', ...caps] })
+					.where(eq(orgRoles.id, w.roles.viewer));
+			const save = () =>
+				api(w, 'viewer', 'POST api/servers/[id]/triggers', {
+					params,
+					body: { kind: 'bounty', config: { reward: 'win', winClaims: 3 } }
+				});
+			await holds(['chat.send']);
+			expect((await save()).status).toBe(403);
+			await holds(['match.control']);
+			expect((await save()).status).toBe(403);
+			await holds(['match.control', 'chat.send']);
+			expect((await save()).status).toBe(201);
+		});
+
 		test('a Team balance rule that whispers needs Chat as well', async () => {
 			const w = await seedWorld(env);
 			const params = { id: w.server.id };
