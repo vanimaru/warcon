@@ -13,7 +13,8 @@
 		knownCauses,
 		notCountedLabel,
 		TEAM_KILL_NOT_COUNTED,
-		VEHICLE_CRASH
+		VEHICLE_CRASH,
+		WEAPON_CLASSES
 	} from '$lib/causes';
 	import { placeholdersFor, unfilled, type PlaceholderGroupKey } from '$lib/placeholders';
 	import { isSteamId } from '$lib/steam-profiles';
@@ -305,6 +306,23 @@
 		const kind = causeKind(cause);
 		return kind === 'vehicle weapon' || kind === 'vehicle' ? kind : 'weapon';
 	};
+	/** A Kill race's weapons: every listed tag of a kind, placed charges too (the race counts them). */
+	const raceWeaponChoices = (chosen: string[]) =>
+		WEAPON_LISTS.map(([kind, title]) => ({
+			kind,
+			title,
+			choices: causeChoices(
+				(c) => causeKind(c) === kind,
+				chosen.filter((c) => listOf(c) === kind)
+			)
+		}));
+	/** Whether every tag of a class is in the list, and the list with the class added or taken out. */
+	const hasClass = (list: string[], tags: readonly string[]) =>
+		tags.every((t) => holds(list, t));
+	const withClass = (list: string[], tags: readonly string[], on: boolean) =>
+		on
+			? [...list, ...tags.filter((t) => !holds(list, t))]
+			: list.filter((c) => !tags.some((t) => t.toLowerCase() === c.toLowerCase()));
 	const weaponChoices = (chosen: string[]) =>
 		WEAPON_LISTS.map(([kind, title]) => ({
 			kind,
@@ -930,7 +948,9 @@
 			watchOnly: b('watchOnly', false),
 			causes: Array.isArray(c.causes)
 				? [...(c.causes as string[])]
-				: ['Id.Item.Defibrillator.Standard'],
+				: kind === 'kill_race'
+					? []
+					: ['Id.Item.Defibrillator.Standard'],
 			minDistanceM: n('minDistanceM', 100),
 			count: n('count', 2),
 			distanceAction,
@@ -1221,6 +1241,7 @@
 				return {
 					target: Number(f.raceTarget),
 					headshotsOnly: f.headshotsOnly,
+					causes: f.causes,
 					teamKillsSubtract: f.teamKillsSubtract,
 					announceEvery: Number(f.announceEvery) || 0,
 					timeLimitMinutes: Number(f.timeLimitMinutes) || 0,
@@ -1507,6 +1528,9 @@
 			case 'kill_race':
 				return [
 					`first side to ${c.target} ${c.headshotsOnly ? 'headshot kills' : 'kills'} wins`,
+					Array.isArray(c.causes) && c.causes.length
+						? `${c.causes.length} weapon${c.causes.length === 1 ? '' : 's'} only`
+						: '',
 					c.teamKillsSubtract ? 'team kills count against' : '',
 					Number(c.announceEvery) > 0 ? `standings every ${c.announceEvery}` : '',
 					Number(c.timeLimitMinutes) > 0 ? `${c.timeLimitMinutes} min limit` : ''
@@ -2534,6 +2558,71 @@
 							><input type="checkbox" bind:checked={f.teamKillsSubtract} /> A team kill takes one off
 							the killer's side</label
 						>
+					</fieldset>
+					<fieldset class="space-y-1.5 text-[13px]">
+						<legend class="field-label">Weapons that count</legend>
+						<div class="flex flex-wrap gap-x-4 gap-y-1">
+							<label class="flex items-center gap-2"
+								><input
+									type="radio"
+									name="race-weapons"
+									checked={!f.causes.length}
+									onchange={() => (f.causes = [])}
+								/> Every weapon</label
+							>
+							<label class="flex items-center gap-2"
+								><input
+									type="radio"
+									name="race-weapons"
+									checked={f.causes.length > 0}
+									onchange={() => {
+										if (!f.causes.length) f.causes = [...WEAPON_CLASSES[0].tags];
+									}}
+								/> Only these</label
+							>
+						</div>
+						{#if f.causes.length}
+							<div class="grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-3">
+								{#each WEAPON_CLASSES as wc (wc.key)}
+									<label class="flex items-center gap-2"
+										><input
+											type="checkbox"
+											checked={hasClass(f.causes, wc.tags)}
+											onchange={(e) => (f.causes = withClass(f.causes, wc.tags, e.currentTarget.checked))}
+										/>
+										{wc.label}</label
+									>
+								{/each}
+							</div>
+							{#each raceWeaponChoices(f.causes) as list (list.kind)}
+								{@const ticked = list.choices.filter((w) => holds(f.causes, w.cause)).length}
+								<details>
+									<summary class="cursor-pointer text-mist-400"
+										>{list.title}, one by one{ticked ? ` (${ticked})` : ''}</summary
+									>
+									<div class="mt-1 grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-3">
+										{#each list.choices as w (w.cause)}
+											<label class="flex items-center gap-2"
+												><input
+													type="checkbox"
+													checked={holds(f.causes, w.cause)}
+													onchange={(e) =>
+														(f.causes = e.currentTarget.checked
+															? [...f.causes, w.cause]
+															: f.causes.filter((c) => c.toLowerCase() !== w.cause.toLowerCase()))}
+												/>
+												{w.label}</label
+											>
+										{/each}
+									</div>
+								</details>
+							{/each}
+							<p class="text-[12px] text-mist-600">
+								Only kills with these count toward a side, the top killer and the standings. Name
+								them in the start message with {'{weapons}'} ("kills with Mosin Nagant, SV98"), so
+								players know. Classes are the panel's own grouping of the game's weapons.
+							</p>
+						{/if}
 					</fieldset>
 					<fieldset class="space-y-2">
 						<legend class="field-label">Along the way</legend>

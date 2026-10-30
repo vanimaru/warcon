@@ -201,3 +201,93 @@ export function causeLabel(cause: string | null | undefined): string {
 			return segs.slice(2).map(pretty).join(' ');
 	}
 }
+
+/**
+ * The hand-held weapons above in classes, for a rule that counts kills by class (the Kill race's
+ * weapons). The panel's own grouping, by what each weapon is (the game sends no class): a class
+ * only fills a rule's list of tags, which stays what the rule keeps and can be changed tag by tag.
+ */
+export const WEAPON_CLASSES: readonly { key: string; label: string; tags: readonly string[] }[] = [
+	{
+		key: 'rifle',
+		label: 'Assault rifles',
+		tags: [
+			'Id.Item.A91',
+			'Id.Item.KH2002',
+			'Id.Item.TAR21',
+			'Id.Item.AK74M',
+			'Id.Item.WEPN_029',
+			'Id.Item.M4',
+			'Id.Item.WEPN_037',
+			'Id.Item.WEPN_033',
+			'Id.Item.MP43'
+		]
+	},
+	{
+		key: 'dmr',
+		label: 'Battle rifles and DMRs',
+		tags: ['Id.Item.WEPN_030', 'Id.Item.WEPN_034', 'Id.Item.SKS', 'Id.Item.SVDM', 'Id.Item.RFB']
+	},
+	{
+		key: 'smg',
+		label: 'SMGs',
+		tags: [
+			'Id.Item.MP9',
+			'Id.Item.Vector',
+			'Id.Item.SMG_03',
+			'Id.Item.WEPN_031',
+			'Id.Item.WEPN_028',
+			'Id.Item.WEPN_036'
+		]
+	},
+	{ key: 'lmg', label: 'LMGs', tags: ['Id.Item.M249', 'Id.Item.LMG_02'] },
+	{ key: 'shotgun', label: 'Shotguns', tags: ['Id.Item.M500'] },
+	{
+		key: 'sniper',
+		label: 'Sniper rifles',
+		tags: ['Id.Item.Mosin', 'Id.Item.SV98', 'Id.Item.MK22', 'Id.Item.SR_04', 'Id.Item.WEPN_035']
+	},
+	{
+		key: 'pistol',
+		label: 'Pistols',
+		tags: [
+			'Id.Item.Glock17',
+			'Id.Item.WEPN_032',
+			'Id.Item.WEPN_026',
+			'Id.Item.WEPN_027',
+			'Id.Item.Judge'
+		]
+	},
+	{ key: 'bow', label: 'Bow', tags: ['Id.Item.CombatBow'] },
+	{
+		key: 'launcher',
+		label: 'Launchers',
+		tags: ['Id.Item.RPG7', 'Id.Item.CGM4', 'Id.Item.MMGL', 'Id.Item.Launcher_04']
+	},
+	{
+		key: 'explosive',
+		label: 'Explosives',
+		tags: [
+			'Id.Item.M67Grenade',
+			'Id.Item.Molotov',
+			'Id.Item.C4Explosive',
+			'Id.Item.IED.Explosive',
+			'Id.Item.ATMine',
+			'Id.Item.Claymore'
+		]
+	},
+	{
+		key: 'melee',
+		label: 'Melee and tools',
+		tags: [
+			'Id.Item.Crowbar',
+			'Id.Item.Fists',
+			'Id.Item.Defibrillator.Standard',
+			'ID.Item.BuildTool.Hammer.Large',
+			'ID.Item.BuildTool.Hammer.Medium',
+			'ID.Item.BuildTool.Hammer.Small',
+			'ID.Item.RepairTool.Drill.Light',
+			'ID.Item.RepairTool.Drill.Heavy'
+		]
+	}
+];

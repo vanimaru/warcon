@@ -982,7 +982,19 @@ async function actOnInfection(
  * match's own rows (kills.match_row, stamped at receipt), within the match's time so the server's
  * kill index is used.
  */
-async function killerLines(env: Env, serverId: string, matchRow: number): Promise<KillerLine[]> {
+async function killerLines(
+	env: Env,
+	serverId: string,
+	matchRow: number,
+	causes: string[] = []
+): Promise<KillerLine[]> {
+	// the rule's weapons, matched in any case (the game's casing varies between tags)
+	const weapons = causes.length
+		? sql`AND lower(k.cause) IN (${sql.join(
+				causes.map((c) => sql`${c.toLowerCase()}`),
+				sql`, `
+			)})`
+		: sql``;
 	const rows = await env.db.execute<{
 		steamId: string;
 		name: string | null;
@@ -998,7 +1010,7 @@ async function killerLines(env: Env, serverId: string, matchRow: number): Promis
 		  FROM kills k JOIN matches m ON m.id = ${matchRow} AND m.server_id = ${serverId}
 		 WHERE k.server_id = ${serverId} AND k.match_row = ${matchRow}
 		   AND k.ts >= m.started_at - interval '5 minutes'
-		   AND k.killer_steam_id IS NOT NULL AND NOT k.suicide
+		   AND k.killer_steam_id IS NOT NULL AND NOT k.suicide ${weapons}
 		 GROUP BY k.killer_steam_id, k.killer_faction`);
 	return rows.map((r) => ({
 		steamId: r.steamId,
@@ -1027,7 +1039,14 @@ async function actOnKillRace(
 	if (!rows.length) return;
 	const matchRow = await stampedMatch(env, serverId, batch);
 	if (matchRow === null) return;
-	const lines = await killerLines(env, serverId, matchRow);
+	// read once per set of weapons: there is one rule per server, but each could name its own
+	const byWeapons = new Map<string, Promise<KillerLine[]>>();
+	const linesFor = (causes: string[] = []) => {
+		const k = causes.map((c) => c.toLowerCase()).join('|');
+		let got = byWeapons.get(k);
+		if (!got) byWeapons.set(k, (got = killerLines(env, serverId, matchRow, causes)));
+		return got;
+	};
 	const factions = (memoryOf(serverId)?.status?.scores ?? []).map((f) => f.name);
 	const latest = [...batch].sort((a, b) => a.eventTime - b.eventTime).at(-1)!;
 	const now = Date.now();
@@ -1037,6 +1056,7 @@ async function actOnKillRace(
 		const { mem, fresh } = raceMemory(serverId, row.id, killRaceSettingsKey(cfg), match, now, true);
 		// the game's match clock says when the match began
 		syncRaceClock(mem, Date.parse(latest.ts), latest.eventTime);
+		const lines = await linesFor(cfg.causes);
 		const news = raceStep(cfg, mem, tally(cfg, lines, factions), fresh);
 		if (!news.length) continue;
 		const out: Evaluation = { intents: [], updates: [] };

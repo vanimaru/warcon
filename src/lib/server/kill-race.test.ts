@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
+	countedWords,
+	countsCause,
 	killRaceSpeaks,
 	leader,
 	newRaceMemory,
@@ -150,5 +152,31 @@ describe('the race', () => {
 		syncRaceClock(mem, T + 5000, 1);
 		expect(mem.clockFrom).toBe(T - 7 * 60_000);
 		expect(raceClock(timed, mem, T + 3 * 60_000)).toMatchObject([{ kind: 'draw' }]);
+	});
+});
+
+describe('the weapons that count', () => {
+	test('every weapon unless the rule names some; matched in any case', () => {
+		expect(validateKillRace({}).causes).toEqual([]);
+		const sniper = validateKillRace({ causes: ['Id.Item.Mosin', 'id.item.mosin', 'Id.Item.SV98'] });
+		expect(sniper.causes).toEqual(['Id.Item.Mosin', 'Id.Item.SV98']);
+		expect(countsCause(sniper, 'ID.ITEM.MOSIN')).toBe(true);
+		expect(countsCause(sniper, 'Id.Item.M4')).toBe(false);
+		expect(countsCause(sniper, null)).toBe(false);
+		expect(countsCause(validateKillRace({}), null)).toBe(true);
+		expect(() => validateKillRace({ causes: ['not a tag!'] })).toThrow('kill feed tag');
+	});
+	test('said in words for {weapons}', () => {
+		expect(countedWords({})).toBe('kills');
+		expect(countedWords({ headshotsOnly: true })).toBe('headshots');
+		expect(countedWords({ causes: ['Id.Item.Mosin', 'Id.Item.SV98'] })).toBe(
+			'kills with Mosin Nagant, SV98'
+		);
+		expect(
+			countedWords({
+				headshotsOnly: true,
+				causes: ['Id.Item.Mosin', 'Id.Item.SV98', 'Id.Item.MK22', 'Id.Item.SR_04', 'Id.Item.M4']
+			})
+		).toBe('headshots with Mosin Nagant, SV98, MK22 and 2 more');
 	});
 });

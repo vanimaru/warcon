@@ -130,7 +130,7 @@ export const MESSAGE_RULES: Readonly<Partial<Record<TriggerKind, MessageRule>>> 
 	// `{kills}` its count, `{top}` the player with the most kills, `{target}` the kills to win
 	kill_race: {
 		fields: ['startMessage', 'progressMessage', 'winMessage', 'drawMessage', 'timeLeftMessage'],
-		own: ['target', 'standings', 'winner', 'kills', 'top', 'minutes'],
+		own: ['target', 'weapons', 'standings', 'winner', 'kills', 'top', 'minutes'],
 		player: false,
 		kept: true
 	}

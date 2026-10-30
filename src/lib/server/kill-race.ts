@@ -12,6 +12,8 @@
 // (each kill batch) and triggers.ts (each look) act on it.
 import { ApiError, int, str } from './http';
 import { settingsFingerprint } from './fingerprint';
+import { causeTags } from './cause-tags';
+import { causeLabel } from '$lib/causes';
 import { KILL_RACE_DEFAULTS } from '$lib/kill-race-defaults';
 
 export { KILL_RACE_DEFAULTS };
@@ -20,6 +22,7 @@ export const KILL_RACE_DEFAULT_TARGET = 100;
 export const KILL_RACE_MIN_TARGET = 5;
 export const KILL_RACE_MAX_TARGET = 5000;
 export const KILL_RACE_MAX_LIMIT_MINUTES = 180;
+export const KILL_RACE_MAX_CAUSES = 150;
 export const KILL_RACE_DEFAULT_TIME_WARNINGS = [5, 1];
 const MAX_WARNINGS = 10;
 
@@ -30,6 +33,8 @@ export interface KillRaceConfig {
 	headshotsOnly: boolean;
 	/** a team kill takes one off the killer's side */
 	teamKillsSubtract: boolean;
+	/** the kill feed tags of the weapons whose kills count; empty: every weapon */
+	causes: string[];
 	/** the standings are announced each time the leader reaches a multiple of this (0: never) */
 	announceEvery: number;
 	/** the match's time limit in minutes (0: none): the side with the most kills then wins */
@@ -69,6 +74,8 @@ export function validateKillRace(c: Record<string, unknown>): KillRaceConfig {
 		target,
 		headshotsOnly: c.headshotsOnly === true,
 		teamKillsSubtract: c.teamKillsSubtract === true,
+		// a few classes of weapons at once: the whole hand-held list, and the vehicles beside it
+		causes: causeTags(c.causes, 'weapon', 'Id.Item.Mosin', KILL_RACE_MAX_CAUSES),
 		announceEvery: int(c.announceEvery, 25, 0, KILL_RACE_MAX_TARGET),
 		timeLimitMinutes: int(c.timeLimitMinutes, 0, 0, KILL_RACE_MAX_LIMIT_MINUTES),
 		timeWarnings,
@@ -129,6 +136,28 @@ export function tally(cfg: KillRaceConfig, lines: KillerLine[], factions: string
 		.map(([faction, kills]) => ({ faction, kills: Math.max(0, kills) }))
 		.sort((a, b) => b.kills - a.kills || a.faction.localeCompare(b.faction));
 	return { sides, top };
+}
+
+/**
+ * What counts, in words, for `{weapons}`: "kills", "headshots", "kills with Mosin Nagant, SV98", or
+ * the first three weapons and how many more.
+ */
+export function countedWords(
+	cfg: Partial<Pick<KillRaceConfig, 'headshotsOnly' | 'causes'>>
+): string {
+	const what = cfg.headshotsOnly ? 'headshots' : 'kills';
+	const causes = cfg.causes ?? [];
+	if (!causes.length) return what;
+	const names = [...new Set(causes.map(causeLabel))];
+	const shown = names.slice(0, 3).join(', ');
+	return `${what} with ${shown}${names.length > 3 ? ` and ${names.length - 3} more` : ''}`;
+}
+
+/** Whether a kill with this cause counts under the rule's weapons (every one when it names none). */
+export function countsCause(cfg: Partial<Pick<KillRaceConfig, 'causes'>>, cause: string | null) {
+	const causes = cfg.causes ?? [];
+	if (!causes.length) return true;
+	return !!cause && causes.some((c) => c.toLowerCase() === cause.toLowerCase());
 }
 
 /** "Valkyra 42 · Lonestar 38 · Manticore 30" */

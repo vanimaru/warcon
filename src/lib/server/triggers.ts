@@ -255,6 +255,8 @@ import {
 import { unlockNote, type UnlockMemory } from './team-unlock-core';
 import {
 	keepRaces,
+	countedWords,
+	countsCause,
 	killRaceSettingsKey,
 	killRaceSpeaks,
 	knownRace,
@@ -1882,7 +1884,7 @@ function evalKillRace(ctx: TickContext, row: TriggerRow, cfg: KillRaceConfig, ou
 				trigger: row,
 				action: 'broadcast',
 				params: {
-					message: say(cfg.startMessage, { target: cfg.target }),
+					message: say(cfg.startMessage, { target: cfg.target, weapons: countedWords(cfg) }),
 					rule: killRaceSettingsKey(cfg)
 				},
 				target: 'start',
@@ -1939,6 +1941,7 @@ export function pushRace(
 		const table = raceStandings(n.tally);
 		const own = (extra: MessageVars = {}): MessageVars => ({
 			target: cfg.target,
+			weapons: countedWords(cfg),
 			standings: table,
 			top: n.tally.top ? `${n.tally.top.name} (${n.tally.top.kills})` : 'nobody',
 			...extra
@@ -3112,9 +3115,11 @@ export async function dryRun(
 			faction: string | null;
 			teamKill: boolean;
 			headshot: boolean;
+			cause: string | null;
 			ts: Date;
 		}>(sql`
-			SELECT match_row AS match, killer_faction AS faction, team_kill AS "teamKill", headshot, ts
+			SELECT match_row AS match, killer_faction AS faction, team_kill AS "teamKill", headshot,
+			       cause, ts
 			  FROM kills
 			 WHERE server_id = ${server.id} AND ts >= ${from} AND killer_steam_id IS NOT NULL
 			   AND NOT suicide AND match_row IS NOT NULL
@@ -3123,6 +3128,8 @@ export async function dryRun(
 		const done = new Set<number>();
 		for (const k of killRows) {
 			if (k.match === null || !k.faction || done.has(k.match)) continue;
+			// only the rule's weapons, when it names any
+			if (!countsCause(c, k.cause)) continue;
 			const sides = counts.get(k.match) ?? new Map<string, number>();
 			counts.set(k.match, sides);
 			// a team kill counts against, when the rule says; otherwise a kill counts (a headshot,
