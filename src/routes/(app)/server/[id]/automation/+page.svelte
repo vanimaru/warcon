@@ -420,7 +420,7 @@
 	const addWanted = (f: Form, steamId: string, name = '') => {
 		const id = steamId.trim();
 		if (!/^\d{17}$/.test(id)) {
-			toast.error('Give a SteamID64: 17 digits.');
+			toast('Give a SteamID64: 17 digits.', 'err');
 			return;
 		}
 		if (f.wanted.some((w) => w.steamId === id)) return;
@@ -594,7 +594,7 @@
 		bountyReward: 'slot' | 'none' | 'win';
 		/** a Bounty rule's claims for a side to win the match (reward 'win'), and what it announces */
 		winClaims: number;
-		winMessage: string;
+		bountyWinMessage: string;
 		/** a Bounty rule's pick, its bounties on each side at once, the top's kills, the named */
 		bountyPick: BountyPickForm;
 		perFaction: number;
@@ -937,7 +937,10 @@
 			bountyReward,
 			bountyPick,
 			winClaims: n('winClaims', 5),
-			winMessage: s('winMessage', '{winner} wins the bounty hunt with {claims} bounties claimed!'),
+			bountyWinMessage: s(
+				'winMessage',
+				'{winner} wins the bounty hunt with {claims} bounties claimed!'
+			),
 			perFaction: n('perFaction', 1),
 			minKills: n('minKills', 5),
 			wanted: Array.isArray(c.wanted)
@@ -1186,7 +1189,7 @@
 					minPlayers: Number(f.minPlayers),
 					reward: f.bountyReward,
 					winClaims: Number(f.winClaims),
-					winMessage: f.winMessage,
+					winMessage: f.bountyWinMessage,
 					slotDays: Number(f.slotDays),
 					scope: f.slotScope,
 					setMessage: f.setMessage,
@@ -3971,7 +3974,7 @@
 							<input
 								class="input"
 								type="text"
-								bind:value={f.winMessage}
+								bind:value={f.bountyWinMessage}
 								maxlength={MAX_CHAT}
 								aria-label="Announce the win"
 							/>
@@ -3996,7 +3999,7 @@
 						f.setMessage,
 						f.claimMessage,
 						f.whisper,
-						f.bountyReward === 'win' ? f.winMessage : ''
+						f.bountyReward === 'win' ? f.bountyWinMessage : ''
 					])}
 					<p class="note">
 						{'{name}'} is the marked player when the bounty is set and the claimer after;

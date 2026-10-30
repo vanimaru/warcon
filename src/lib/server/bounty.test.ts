@@ -356,7 +356,7 @@ describe('the Bounty rule, picked by side', () => {
 		expect(bountyStep(cfg, t, [kill(C, D), kill(C, E), kill(C, G)], at).map((e) => e.kind)).toEqual(
 			['claim']
 		);
-		expect(runWords(claim.bounty)).toBe('10 kills when marked');
+		expect(claim.kind === 'claim' && runWords(claim.bounty)).toBe('10 kills when marked');
 	});
 
 	test('named players are marked while they are on, in the order named, up to the count', () => {
