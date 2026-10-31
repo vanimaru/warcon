@@ -122,7 +122,11 @@ const METRIC_SQL: Record<BoardMetric, SQL> = {
 	wins: sql`wins`,
 	winRate: sql`CASE WHEN wins + losses + draws > 0 THEN wins::float / (wins + losses + draws) ELSE NULL END`,
 	cash: sql`cash`,
-	cashPerMin: sql`CASE WHEN cash_minutes - seed_minutes > 0 THEN cash::float / (cash_minutes - seed_minutes) ELSE NULL END`
+	cashPerMin: sql`CASE WHEN cash_minutes - seed_minutes > 0 THEN cash::float / (cash_minutes - seed_minutes) ELSE NULL END`,
+	headshots: sql`headshots`,
+	hsRate: sql`CASE WHEN kills > 0 THEN LEAST(1, headshots::float / kills) ELSE NULL END`,
+	vehicleKills: sql`vehicle_kills`,
+	killStreak: sql`kill_streak`
 };
 
 /** Every all-time base row over these servers (or these players), each column as text. */

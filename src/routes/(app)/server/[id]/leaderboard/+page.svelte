@@ -7,6 +7,8 @@
 	import { api, errorMessage, qs } from '$lib/api';
 	import { toast } from '$lib/toast.svelte';
 	import LeaderboardTable from '$lib/components/LeaderboardTable.svelte';
+	import WeaponBoard from '$lib/components/WeaponBoard.svelte';
+	import { parseWeaponQuery, weaponQueryParams, type WeaponBoardQuery } from '$lib/weapon-board';
 	import {
 		boardQueryParams,
 		parseBoardQuery,
@@ -19,6 +21,11 @@
 	let { data }: PageProps = $props();
 	let id = $derived(data.server.id);
 	let query = $state<BoardQuery>(parseBoardQuery(page.url.searchParams));
+	/** the players' board, or the weapons' (`?view=weapons`) */
+	let view = $state<'players' | 'weapons'>(
+		page.url.searchParams.get('view') === 'weapons' ? 'weapons' : 'players'
+	);
+	let weaponQuery = $state<WeaponBoardQuery>(parseWeaponQuery(page.url.searchParams));
 	let board = $state<BoardView | null>(null);
 	let loading = $state(false);
 	let seq = 0;
@@ -45,15 +52,41 @@
 		}
 	}
 	$effect(() => {
+		if (view !== 'players') return;
 		const q = query;
 		const url = new URL(page.url);
 		url.search = qs(boardQueryParams(q));
 		if (url.search !== page.url.search) replaceState(url, {});
 		void load(q);
 	});
+	$effect(() => {
+		if (view !== 'weapons') return;
+		const url = new URL(page.url);
+		url.search = qs({ view: 'weapons', ...weaponQueryParams(weaponQuery) });
+		if (url.search !== page.url.search) replaceState(url, {});
+	});
 </script>
 
 <div class="panel">
+	<div class="join mb-3">
+		<button
+			class="btn btn-sm {view === 'players' ? 'btn-primary' : ''}"
+			onclick={() => (view = 'players')}>Players</button
+		>
+		<button
+			class="btn btn-sm {view === 'weapons' ? 'btn-primary' : ''}"
+			onclick={() => (view = 'weapons')}>Weapons</button
+		>
+	</div>
+	{#if view === 'weapons'}
+		<WeaponBoard
+			serverId={id}
+			query={weaponQuery}
+			onchange={(q) => (weaponQuery = q)}
+			hrefFor={(steamId) => `/server/${encodeURIComponent(id)}/players/${steamId}`}
+			orgName={data.server.orgName}
+		/>
+	{:else}
 	<LeaderboardTable
 		{board}
 		{query}
@@ -75,4 +108,5 @@
 				class="text-accent hover:underline">/s/{id}/leaderboard</a
 			>.{/if}
 	</p>
+	{/if}
 </div>

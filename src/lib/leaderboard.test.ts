@@ -195,6 +195,15 @@ describe('metricValue', () => {
 		cash: 900,
 		lastSeen: null
 	};
+	test('the feed’s columns: headshots, their share of kills, vehicle kills, the best streak', () => {
+		expect(metricValue(row, 'headshots')).toBe(5);
+		expect(metricValue(row, 'hsRate')).toBe(5 / 40);
+		expect(metricValue(row, 'vehicleKills')).toBe(0);
+		expect(metricValue(row, 'killStreak')).toBe(6);
+		// nothing to rank without kills; never above every kill
+		expect(metricValue({ ...row, kills: 0, headshots: 0 }, 'hsRate')).toBeNull();
+		expect(metricValue({ ...row, kills: 3, headshots: 4 }, 'hsRate')).toBe(1);
+	});
 	test('reads each column through the same maths', () => {
 		expect(metricValue(row, 'kd')).toBe(40);
 		// 40 kills over the 75 minutes that were not seed time

@@ -23,7 +23,11 @@ export type BoardMetric =
 	| 'wins'
 	| 'winRate'
 	| 'cash'
-	| 'cashPerMin';
+	| 'cashPerMin'
+	| 'headshots'
+	| 'hsRate'
+	| 'vehicleKills'
+	| 'killStreak';
 export type SortDir = 'asc' | 'desc';
 
 export const BOARD_RANGES: { key: FixedRange; label: string; ms: number | null }[] = [
@@ -43,7 +47,11 @@ export const BOARD_METRICS: { key: BoardMetric; label: string }[] = [
 	{ key: 'wins', label: 'Wins' },
 	{ key: 'winRate', label: 'Win rate' },
 	{ key: 'cash', label: 'Cash' },
-	{ key: 'cashPerMin', label: 'Cash per minute' }
+	{ key: 'cashPerMin', label: 'Cash per minute' },
+	{ key: 'headshots', label: 'Headshots' },
+	{ key: 'hsRate', label: 'Headshot rate' },
+	{ key: 'vehicleKills', label: 'Vehicle kills' },
+	{ key: 'killStreak', label: 'Best kill streak' }
 ];
 const METRIC_KEYS = new Set<string>(BOARD_METRICS.map((m) => m.key));
 const RANGE_KEYS = new Set<string>(BOARD_RANGES.map((r) => r.key));
@@ -191,7 +199,10 @@ export const BOARD_COLUMNS = [
 	{ key: 'deaths', label: 'Deaths', head: 'D', sort: 'deaths' },
 	{ key: 'kd', label: 'Kills per death', head: 'K/D', sort: 'kd' },
 	{ key: 'perHour', label: 'Kills per hour', head: 'K/h', sort: 'perHour' },
-	{ key: 'headshots', label: 'Headshots', head: 'HS', sort: null },
+	{ key: 'headshots', label: 'Headshots', head: 'HS', sort: 'headshots' },
+	{ key: 'hsRate', label: 'Headshot rate', head: 'HS%', sort: 'hsRate' },
+	{ key: 'vehicleKills', label: 'Vehicle kills', head: 'Veh', sort: 'vehicleKills' },
+	{ key: 'killStreak', label: 'Best kill streak', head: 'Streak', sort: 'killStreak' },
 	{ key: 'teamKills', label: 'Team kills', head: 'TK', sort: null },
 	{ key: 'matches', label: 'Matches', head: 'Matches', sort: 'matches' },
 	{ key: 'results', label: 'Wins, losses, draws', head: 'W-L-D', sort: 'wins' },
@@ -257,6 +268,13 @@ export const perMinute = (cash: number, minutes: number, seedMinutes = 0): numbe
 	minutes - seedMinutes > 0 ? cash / (minutes - seedMinutes) : null;
 
 /** Wins over the matches that had a result; nothing without one. */
+/**
+ * Headshots per kill counted from the kill feed: the feed's headshots over the game's kills, so a
+ * server without a feed (or a player without feed kills) has none to rank.
+ */
+export const headshotRate = (headshots: number, kills: number): number | null =>
+	kills > 0 && headshots > 0 ? Math.min(1, headshots / kills) : kills > 0 ? 0 : null;
+
 export const winRate = (wins: number, losses: number, draws: number): number | null => {
 	const played = wins + losses + draws;
 	return played > 0 ? wins / played : null;
@@ -347,6 +365,14 @@ export function metricValue(row: BoardRow, metric: BoardMetric): number | null {
 			return row.cash;
 		case 'cashPerMin':
 			return perMinute(row.cash, row.cashMinutes, row.seedMinutes);
+		case 'headshots':
+			return row.headshots;
+		case 'hsRate':
+			return headshotRate(row.headshots, row.kills);
+		case 'vehicleKills':
+			return row.vehicleKills;
+		case 'killStreak':
+			return row.killStreak;
 	}
 }
 

@@ -1035,7 +1035,9 @@ last result as a status code or a short reason, never what the receiver answered
 Every server page has a **Leaderboards** tab: a board over this server or every server of the
 organisation you can see, ranked by kills, deaths, K/D, kills per hour of playtime, playtime,
 seed time (time on with the server low, as a [Seeding reward](#automation-triggers) counts it),
-matches played, wins, win rate, cash or cash per minute of playtime, over a [season](#seasons), 7,
+matches played, wins, win rate, cash or cash per minute of playtime, or, from the kill feed,
+headshots, headshot rate (the feed's headshots over the game's kills), vehicle kills or the best
+kill streak in one match, over a [season](#seasons), 7,
 30 or 90 days or all time,
 paged, with sortable headers. A **playtime floor** (an hour by default) keeps a ten-minute visit off the top of the
 K/D board. Every stat is summed from the player's line of each match: the worker records one
@@ -1056,6 +1058,15 @@ from each player's totals per server, which the database keeps as sessions close
 plus the sessions still open; 7, 30 and 90 days from the same totals kept per UTC day, plus the
 part of the range's first day and the sessions still open, so a range still starts to the second
 (now minus 7 days), not at a midnight.
+
+Its **Weapons** view ranks the players by their kills with a weapon, a class of weapons
+(assault rifles, sniper rifles, pistols, …: the panel's own grouping), the vehicles' weapons, the
+vehicles themselves or every weapon, by kills, headshots or the longest kill, with each player's
+most used weapon, over the same seasons and ranges and this server or the organisation; beside it
+the weapons themselves ranked by their kills (a click shows that weapon's board). It is read from
+the stored kill feed: a kill of another side counts, suicides, team kills and the environment do
+not. `GET /api/servers/:id/leaderboard/weapons?scope=&range=&weapon=all|class:<key>|vehicleWeapons|vehicles|cause:<tag>&wsort=kills|headshots|longest&page=`
+answers it (View).
 
 #### Seasons
 
