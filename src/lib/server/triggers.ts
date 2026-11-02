@@ -2066,9 +2066,9 @@ async function evalEconomicWar(
 	if (ctx.matchEnd) {
 		if (mem) pushEcon(out, row, cfg, mem.match, econAtMatchEnd(mem, econTally(mem, teams)), say);
 		// the next match: everyone's cash as it stands is where they start from
-		mem = newEconMemory(settingsKey, ctx.status.map, now, true);
+		mem = newEconMemory(settingsKey, ctx.status.map, now, true, cfg.matchGraceSeconds * 1000);
 		keepEcon(row.id, ctx.server.id, mem);
-		if (ctx.playersObserved) econLook(mem, ctx.players, teams, now);
+		if (ctx.playersObserved) econLook(mem, ctx.players, teams, now, cfg.joinGraceSeconds * 1000);
 		if (cfg.startMessage)
 			out.intents.push({
 				trigger: row,
@@ -2100,7 +2100,7 @@ async function evalEconomicWar(
 	}
 	syncEconClock(mem, now, ctx.status.matchSeconds);
 	if (ctx.recovered) econRebase(mem);
-	else if (ctx.playersObserved) econLook(mem, ctx.players, teams, now);
+	else if (ctx.playersObserved) econLook(mem, ctx.players, teams, now, cfg.joinGraceSeconds * 1000);
 	const t = econTally(mem, teams);
 	pushEcon(
 		out,
@@ -3336,7 +3336,8 @@ export async function dryRun(
 		// No player's cash is kept look by look; the samples keep the cash each side held, a minute
 		// or so apart, which is what a replay can go on: a side's rise from one sample to the next is
 		// taken as earned. Money spent between two samples hides as much earned, and a player who
-		// joins with cash brings it in, so it is an estimate.
+		// joins with cash brings it in (the late joiners' grace is not replayed), so it is an
+		// estimate.
 		const c = cfg as EconomicWarConfig;
 		const [matchRows, sampleRows] = await Promise.all([
 			env.db.execute<{ id: number; startedAt: Date; endedAt: Date | null }>(sql`
@@ -3367,7 +3368,7 @@ export async function dryRun(
 				s.cash.filter((f) => f && f.name).map((f) => [f.name, Number(f.cash) || 0])
 			);
 			held.set(m.id, now);
-			if (!before || at < m.from + ECONOMIC_WAR_GRACE_MS) continue;
+			if (!before || at < m.from + c.matchGraceSeconds * 1000) continue;
 			const sides = earned.get(m.id) ?? new Map<string, number>();
 			earned.set(m.id, sides);
 			for (const [f, n] of now) {

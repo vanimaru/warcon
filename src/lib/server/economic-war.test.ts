@@ -37,6 +37,14 @@ describe('Economic War settings', () => {
 		expect(validateEconomicWar({}).timeLimitMinutes).toBe(0);
 		expect(validateEconomicWar({}).timeWarnings).toEqual([5, 1]);
 	});
+	test('the graces for the starting cash, 30 seconds each by default, 0 to 300', () => {
+		const d = validateEconomicWar({});
+		expect([d.matchGraceSeconds, d.joinGraceSeconds]).toEqual([30, 30]);
+		const set = validateEconomicWar({ matchGraceSeconds: 0, joinGraceSeconds: 90 });
+		expect([set.matchGraceSeconds, set.joinGraceSeconds]).toEqual([0, 90]);
+		expect(validateEconomicWar({ matchGraceSeconds: 999 }).matchGraceSeconds).toBe(300);
+		expect(validateEconomicWar({ joinGraceSeconds: -5 }).joinGraceSeconds).toBe(0);
+	});
 	test('says nothing with every text blank', () => {
 		expect(economicWarSpeaks(cfg)).toBe(true);
 		expect(
@@ -97,6 +105,42 @@ describe('Economic War count', () => {
 		expect(econTally(mem, TEAMS).sides[0].cash).toBe(0);
 		econLook(mem, [p('a', 'Valkyra', 2150)], TEAMS, T0 + ECONOMIC_WAR_GRACE_MS + 1);
 		expect(econTally(mem, TEAMS).sides[0].cash).toBe(150);
+	});
+	test("the match's grace is the rule's", () => {
+		const mem = newEconMemory('k', 'Ozeti', T0, true, 60_000);
+		econLook(mem, [p('a', 'Valkyra', 0)], TEAMS, T0);
+		econLook(mem, [p('a', 'Valkyra', 2000)], TEAMS, T0 + 45_000);
+		expect(econTally(mem, TEAMS).sides[0].cash).toBe(0);
+		const none = newEconMemory('k', 'Ozeti', T0, true, 0);
+		econLook(none, [p('a', 'Valkyra', 0)], TEAMS, T0);
+		econLook(none, [p('a', 'Valkyra', 150)], TEAMS, T0 + 2000);
+		expect(econTally(none, TEAMS).sides[0].cash).toBe(150);
+	});
+	test("a late joiner's first seconds on a side are their starting cash", () => {
+		const mem = newEconMemory('k', 'Ozeti', T0, false);
+		const GRACE = 30_000;
+		// a player on a side at the first look is no late joiner
+		econLook(mem, [p('a', 'Valkyra', 0)], TEAMS, T0, GRACE);
+		econLook(mem, [p('a', 'Valkyra', 100)], TEAMS, T0 + 2000, GRACE);
+		// b joins in the menu, takes a side, then gets the starting cash
+		econLook(mem, [p('a', 'Valkyra', 100), p('b', null, 0)], TEAMS, T0 + 4000, GRACE);
+		econLook(mem, [p('a', 'Valkyra', 100), p('b', 'Lonestar', 0)], TEAMS, T0 + 6000, GRACE);
+		econLook(mem, [p('a', 'Valkyra', 100), p('b', 'Lonestar', 2000)], TEAMS, T0 + 8000, GRACE);
+		expect(econTally(mem, TEAMS).sides.find((s) => s.faction === 'Lonestar')?.cash).toBe(0);
+		// after the grace, b earns
+		econLook(mem, [p('a', 'Valkyra', 100), p('b', 'Lonestar', 2150)], TEAMS, T0 + 36_001, GRACE);
+		const t = econTally(mem, TEAMS);
+		expect(t.sides.find((s) => s.faction === 'Lonestar')?.cash).toBe(150);
+		expect(t.sides.find((s) => s.faction === 'Valkyra')?.cash).toBe(100);
+		// a switch of side is no new join
+		econLook(mem, [p('a', 'Valkyra', 100), p('b', 'Manticore', 2150)], TEAMS, T0 + 38_000, GRACE);
+		econLook(mem, [p('a', 'Valkyra', 100), p('b', 'Manticore', 2300)], TEAMS, T0 + 40_000, GRACE);
+		expect(econTally(mem, TEAMS).sides.find((s) => s.faction === 'Manticore')?.cash).toBe(150);
+		// gone and back: a late joiner again
+		econLook(mem, [p('a', 'Valkyra', 100)], TEAMS, T0 + 42_000, GRACE);
+		econLook(mem, [p('a', 'Valkyra', 100), p('b', 'Manticore', 0)], TEAMS, T0 + 44_000, GRACE);
+		econLook(mem, [p('a', 'Valkyra', 100), p('b', 'Manticore', 2000)], TEAMS, T0 + 46_000, GRACE);
+		expect(econTally(mem, TEAMS).sides.find((s) => s.faction === 'Manticore')?.cash).toBe(150);
 	});
 	test('after an outage everyone starts again from their cash then', () => {
 		const mem = newEconMemory('k', 'Ozeti', T0, false);

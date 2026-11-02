@@ -672,8 +672,11 @@
 		progressMessage: string;
 		winMessage: string;
 		drawMessage: string;
-		/** an Economic War rule's cash to win (its steps, limit and texts are the Kill race's fields) */
+		/** an Economic War rule's cash to win (its steps, limit and texts are the Kill race's fields),
+		 *  and the seconds a match's start and a late joiner's first moments on a side do not count */
 		econTarget: number;
+		matchGraceSeconds: number;
+		joinGraceSeconds: number;
 	}
 	/** An Infection rule's texts, in the order a round goes, with what each is for. */
 	const INFECTION_TEXTS = [
@@ -1049,7 +1052,9 @@
 			progressMessage: s('progressMessage', raceTexts.progressMessage),
 			winMessage: s('winMessage', raceTexts.winMessage),
 			drawMessage: s('drawMessage', raceTexts.drawMessage),
-			econTarget: n('target', 30000)
+			econTarget: n('target', 30000),
+			matchGraceSeconds: n('matchGraceSeconds', 30),
+			joinGraceSeconds: n('joinGraceSeconds', 30)
 		};
 		dry = null;
 		pendingSel =
@@ -1278,6 +1283,8 @@
 			case 'economic_war':
 				return {
 					target: Number(f.econTarget),
+					matchGraceSeconds: Number(f.matchGraceSeconds) || 0,
+					joinGraceSeconds: Number(f.joinGraceSeconds) || 0,
 					announceEvery: Number(f.announceEvery) || 0,
 					timeLimitMinutes: Number(f.timeLimitMinutes) || 0,
 					timeWarnings: f.timeWarnings
@@ -1575,6 +1582,7 @@
 			case 'economic_war':
 				return [
 					`first side to earn ${fmtCash(Number(c.target))} wins`,
+					`starting cash ${c.matchGraceSeconds ?? 30}s / joiners ${c.joinGraceSeconds ?? 30}s`,
 					Number(c.announceEvery) > 0
 						? `standings every ${fmtCash(Number(c.announceEvery))}`
 						: '',
@@ -2763,8 +2771,40 @@
 						</div>
 						<p class="text-[12px] text-mist-600">
 							What counts is the cash each player earns while on a side, added up per side. Money
-							spent (a vehicle, a loadout) is not taken off, and the starting cash of a match does
-							not count.
+							spent (a vehicle, a loadout) is not taken off.
+						</p>
+					</fieldset>
+					<fieldset class="space-y-2">
+						<legend class="field-label">Starting cash (not counted)</legend>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							The first
+							<input
+								class="input w-20 text-right"
+								type="number"
+								min="0"
+								max="300"
+								bind:value={f.matchGraceSeconds}
+								aria-label="Seconds of a match's start that do not count"
+							/>
+							s of a match count for nobody.
+						</div>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							A player who joins mid-match earns nothing for their first
+							<input
+								class="input w-20 text-right"
+								type="number"
+								min="0"
+								max="300"
+								bind:value={f.joinGraceSeconds}
+								aria-label="Seconds after a late joiner takes a side that do not count"
+							/>
+							s on a side.
+						</div>
+						<p class="text-[12px] text-mist-600">
+							The game hands out a starting cash nobody earned; these keep it out of the count (0
+							to 300 seconds each, 0: none). A player's cash when the rule first sees them never
+							counts either way. Set them to how long the game takes to hand it out, as the
+							Players tab's cash column shows.
 						</p>
 					</fieldset>
 					<fieldset class="space-y-2">

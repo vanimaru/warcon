@@ -11,8 +11,9 @@
 // spent (a vehicle, a loadout) lowers the cash and is not taken off, so buying does not cost a side
 // its progress; a drop is also how the scoreboard starts a player's cash again (a reconnect, a new
 // match), and either way the next rise counts from there. A player's first look only sets where
-// they start from, and so does every look in the first seconds of a match, when the game hands out
-// the starting cash. Players without a side earn for nobody.
+// they start from, and so do two stretches the rule sets, for the starting cash the game hands out:
+// the first seconds of a match, for everyone, and the first seconds after a player who joins later
+// first takes a side, for them. Players without a side earn for nobody.
 //
 // Kept in the worker's memory, and written to the rule's row (state) now and then with the match it
 // is for, so a worker restart in the same match carries on from the last write. Pure here, but for
@@ -31,8 +32,11 @@ export const ECONOMIC_WAR_MAX_TARGET = 10_000_000;
 export const ECONOMIC_WAR_DEFAULT_STEP = 5_000;
 export const ECONOMIC_WAR_MAX_LIMIT_MINUTES = 180;
 export const ECONOMIC_WAR_DEFAULT_TIME_WARNINGS = [5, 1];
-/** A match's first seconds: the game hands out the starting cash, which nobody earned. */
+/** A match's first seconds, and a late joiner's first seconds on a side, by default: the game
+ *  hands out the starting cash, which nobody earned. */
 export const ECONOMIC_WAR_GRACE_MS = 30_000;
+export const ECONOMIC_WAR_DEFAULT_GRACE_SECONDS = 30;
+export const ECONOMIC_WAR_MAX_GRACE_SECONDS = 300;
 /** How often the count is written to the rule's row while it moves. */
 export const ECONOMIC_WAR_SAVE_MS = 15_000;
 /** The top earners kept in the row (the count of the sides is kept whole). */
@@ -48,6 +52,11 @@ export interface EconomicWarConfig {
 	timeLimitMinutes: number;
 	/** minutes left announced as the limit nears */
 	timeWarnings: number[];
+	/** the first seconds of a match, when nobody's rise counts (the starting cash) */
+	matchGraceSeconds: number;
+	/** the first seconds after a player who joins mid-match first takes a side, when their rise
+	 *  does not count (their starting cash) */
+	joinGraceSeconds: number;
 	startMessage: string;
 	progressMessage: string;
 	winMessage: string;
@@ -82,6 +91,18 @@ export function validateEconomicWar(c: Record<string, unknown>): EconomicWarConf
 		announceEvery: int(c.announceEvery, ECONOMIC_WAR_DEFAULT_STEP, 0, ECONOMIC_WAR_MAX_TARGET),
 		timeLimitMinutes: int(c.timeLimitMinutes, 0, 0, ECONOMIC_WAR_MAX_LIMIT_MINUTES),
 		timeWarnings,
+		matchGraceSeconds: int(
+			c.matchGraceSeconds,
+			ECONOMIC_WAR_DEFAULT_GRACE_SECONDS,
+			0,
+			ECONOMIC_WAR_MAX_GRACE_SECONDS
+		),
+		joinGraceSeconds: int(
+			c.joinGraceSeconds,
+			ECONOMIC_WAR_DEFAULT_GRACE_SECONDS,
+			0,
+			ECONOMIC_WAR_MAX_GRACE_SECONDS
+		),
 		startMessage: text('startMessage'),
 		progressMessage: text('progressMessage'),
 		winMessage: text('winMessage'),
@@ -125,6 +146,10 @@ export interface EconMemory {
 	earners: Map<string, { name: string; cash: number }>;
 	/** each player's cash at the last look they were on */
 	last: Map<string, number>;
+	/** when each player on the list first had a side this match (0: already at the first look) */
+	sidedAt: Map<string, number>;
+	/** a look has been taken: players on a side then are no late joiners */
+	looked: boolean;
 	/** rises before this time set where players start from and earn nothing */
 	graceUntil: number;
 	/** the highest multiple of announceEvery announced */
@@ -142,14 +167,15 @@ export interface EconMemory {
 
 /**
  * A memory for a match. `boundary` says the match is just beginning (its end was seen), so the
- * first seconds' rises are the game's starting cash; a memory made mid-match only takes everyone's
- * cash as it stands at its first look.
+ * rises of its first `graceMs` are the game's starting cash; a memory made mid-match only takes
+ * everyone's cash as it stands at its first look.
  */
 export const newEconMemory = (
 	key: string,
 	map: string,
 	now: number,
-	boundary: boolean
+	boundary: boolean,
+	graceMs = ECONOMIC_WAR_GRACE_MS
 ): EconMemory => ({
 	key,
 	match: `t${now}`,
@@ -158,7 +184,9 @@ export const newEconMemory = (
 	sides: new Map(),
 	earners: new Map(),
 	last: new Map(),
-	graceUntil: boundary ? now + ECONOMIC_WAR_GRACE_MS : 0,
+	sidedAt: new Map(),
+	looked: false,
+	graceUntil: boundary ? now + graceMs : 0,
 	step: 0,
 	decided: false,
 	clockFrom: now,
@@ -170,34 +198,43 @@ export const newEconMemory = (
 
 /**
  * One look at the player list: each player's rise since their last look goes to the side they are
- * on (a team on the scoreboard), and players gone from the list are forgotten (what they earned
- * stays with their side). Returns whether anything was earned. Mutates `mem`.
+ * on (a team on the scoreboard), but for the first `joinGraceMs` after a player who was not on a
+ * side at the memory's first look takes one; players gone from the list are forgotten (what they
+ * earned stays with their side, and back on the list they are late joiners again). Returns whether
+ * anything was earned. Mutates `mem`.
  */
 export function econLook(
 	mem: EconMemory,
 	players: Pick<Player, 'steamId' | 'name' | 'faction' | 'cash'>[],
 	teams: readonly string[],
-	now: number
+	now: number,
+	joinGraceMs = 0
 ): boolean {
 	const on = new Set<string>();
 	let earned = false;
 	const counting = !mem.decided && now >= mem.graceUntil;
+	const first = !mem.looked;
+	mem.looked = true;
 	for (const p of players) {
 		if (!p.steamId) continue;
 		on.add(p.steamId);
+		const sided = !!p.faction && teams.includes(p.faction);
+		if (sided && !mem.sidedAt.has(p.steamId)) mem.sidedAt.set(p.steamId, first ? 0 : now);
 		const cash = Number(p.cash);
 		if (!Number.isFinite(cash)) continue;
 		const prev = mem.last.get(p.steamId);
 		mem.last.set(p.steamId, cash);
-		if (prev === undefined || !counting) continue;
+		if (prev === undefined || !counting || !sided || !p.faction) continue;
+		if (now < (mem.sidedAt.get(p.steamId) ?? now) + joinGraceMs) continue;
 		const rise = cash - prev;
-		if (rise <= 0 || !p.faction || !teams.includes(p.faction)) continue;
+		if (rise <= 0) continue;
 		mem.sides.set(p.faction, (mem.sides.get(p.faction) ?? 0) + rise);
 		const e = mem.earners.get(p.steamId);
 		mem.earners.set(p.steamId, { name: p.name || p.steamId, cash: (e?.cash ?? 0) + rise });
 		earned = true;
 	}
 	for (const id of mem.last.keys()) if (!on.has(id)) mem.last.delete(id);
+	for (const id of mem.sidedAt.keys()) if (!on.has(id)) mem.sidedAt.delete(id);
 	if (earned) mem.dirty = true;
 	return earned;
 }
