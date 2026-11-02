@@ -675,6 +675,10 @@
 		/** an Economic War rule's cash to win (its steps, limit and texts are the Kill race's fields),
 		 *  and the seconds a match's start and a late joiner's first moments on a side do not count */
 		econTarget: number;
+		/** an Economic War rule's percentages of the target announced, and their text; money spent
+		 *  taken off */
+		milestoneMessage: string;
+		spendingCounts: boolean;
 		matchGraceSeconds: number;
 		joinGraceSeconds: number;
 	}
@@ -702,6 +706,7 @@
 	/** An Economic War rule's texts, in the order a match goes, with what each is for. */
 	const ECON_TEXTS = [
 		['startMessage', 'As a match starts'],
+		['milestoneMessage', 'As the leader reaches each percentage of the target'],
 		['progressMessage', 'Each time the leader passes a step'],
 		['timeLeftMessage', 'As the time left falls to each warning'],
 		['winMessage', 'When a side wins'],
@@ -1018,7 +1023,11 @@
 			survivorFaction: s('survivorFaction', ''),
 			startInfected: n('startInfected', 1),
 			perPlayers: n('perPlayers', 10),
-			milestones: Array.isArray(c.milestones) ? (c.milestones as number[]).join(', ') : '25, 10, 5',
+			milestones: Array.isArray(c.milestones)
+				? (c.milestones as number[]).join(', ')
+				: kind === 'economic_war'
+					? '25, 50, 75, 90, 95'
+					: '25, 10, 5',
 			patientWhisper: s('patientWhisper', INFECTION_DEFAULTS.patientWhisper),
 			// a new rule respawns its first infected on their new side
 			respawnPatients: b('respawnPatients', !t && kind === 'infection'),
@@ -1048,8 +1057,10 @@
 			raceTarget: n('target', 100),
 			headshotsOnly: b('headshotsOnly', false),
 			teamKillsSubtract: b('teamKillsSubtract', false),
-			announceEvery: n('announceEvery', kind === 'economic_war' ? 5000 : 25),
+			announceEvery: n('announceEvery', kind === 'economic_war' ? 0 : 25),
 			progressMessage: s('progressMessage', raceTexts.progressMessage),
+			milestoneMessage: s('milestoneMessage', ECONOMIC_WAR_DEFAULTS.milestoneMessage),
+			spendingCounts: b('spendingCounts', false),
 			winMessage: s('winMessage', raceTexts.winMessage),
 			drawMessage: s('drawMessage', raceTexts.drawMessage),
 			econTarget: n('target', 30000),
@@ -1283,6 +1294,12 @@
 			case 'economic_war':
 				return {
 					target: Number(f.econTarget),
+					spendingCounts: f.spendingCounts,
+					milestones: f.milestones
+						.split(/[\s,]+/)
+						.filter(Boolean)
+						.map(Number),
+					milestoneMessage: f.milestoneMessage,
 					matchGraceSeconds: Number(f.matchGraceSeconds) || 0,
 					joinGraceSeconds: Number(f.joinGraceSeconds) || 0,
 					announceEvery: Number(f.announceEvery) || 0,
@@ -1582,6 +1599,10 @@
 			case 'economic_war':
 				return [
 					`first side to earn ${fmtCash(Number(c.target))} wins`,
+					c.spendingCounts ? 'spending counts against' : '',
+					Array.isArray(c.milestones) && c.milestones.length
+						? `told at ${(c.milestones as number[]).join(', ')}%`
+						: '',
 					`starting cash ${c.matchGraceSeconds ?? 30}s / joiners ${c.joinGraceSeconds ?? 30}s`,
 					Number(c.announceEvery) > 0 ? `standings every ${fmtCash(Number(c.announceEvery))}` : '',
 					Number(c.timeLimitMinutes) > 0 ? `${c.timeLimitMinutes} min limit` : ''
@@ -2767,9 +2788,15 @@
 							/>
 							wins, and the match is ended.
 						</div>
+						<label class="flex items-center gap-2 text-[13px]"
+							><input type="checkbox" bind:checked={f.spendingCounts} /> Money spent counts against
+							the side (a vehicle, a loadout)</label
+						>
 						<p class="text-[12px] text-mist-600">
-							What counts is the cash each player earns while on a side, added up per side. Money
-							spent (a vehicle, a loadout) is not taken off.
+							What counts is the cash each player earns while on a side, added up per side. With
+							money spent counting against, a drop in a player's cash is taken off their side and
+							them, unless their kills or deaths dropped with it (the game started their scoreboard
+							again: a reconnect, a new match). A side below 0 shows 0 and earns it back first.
 						</p>
 					</fieldset>
 					<fieldset class="space-y-2">
@@ -2807,6 +2834,18 @@
 					</fieldset>
 					<fieldset class="space-y-2">
 						<legend class="field-label">Along the way</legend>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							Announce as the leader reaches
+							<input
+								class="input w-44"
+								type="text"
+								data-plain
+								bind:value={f.milestones}
+								placeholder="25, 50, 75, 90, 95"
+								aria-label="Percentages of the target to announce"
+							/>
+							% of the target (each once a match, 1 to 99)
+						</div>
 						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
 							Announce the standings every $
 							<input
@@ -2853,15 +2892,18 @@
 						{/each}
 						{@render placeholders('economic_war', [
 							f.startMessage,
+							f.milestoneMessage,
 							f.progressMessage,
 							f.timeLeftMessage,
 							f.winMessage,
 							f.drawMessage
 						])}
 						<p class="text-[12px] text-mist-600">
-							{'{standings}'} lists what every side has earned, {'{winner}'} and {'{cash}'} the side that
-							won and its earnings, {'{top}'} the player who earned the most, {'{target}'} the cash to
-							win and {'{minutes}'} the time left. Empty sends nothing.
+							{'{standings}'} lists what every side has earned, {'{leader}'} and {'{percent}'} the
+							side ahead and the share of the target it reached, {'{winner}'} and {'{cash}'} the side
+							that won and its earnings, {'{top}'} the player who earned the most (after what they
+							spent, when that counts), {'{target}'} the cash to win and {'{minutes}'} the time left.
+							Empty sends nothing.
 						</p>
 					</fieldset>
 					<p class="note">

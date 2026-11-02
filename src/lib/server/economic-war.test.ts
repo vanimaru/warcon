@@ -17,14 +17,16 @@ import {
 	validateEconomicWar
 } from './economic-war';
 
-const cfg = validateEconomicWar({ target: 10_000, announceEvery: 2_000 });
+const cfg = validateEconomicWar({ target: 10_000, announceEvery: 2_000, milestones: [] });
 const TEAMS = ['Valkyra', 'Lonestar', 'Manticore'];
 const T0 = 1_000_000;
-const p = (steamId: string, faction: string | null, cash: number) => ({
+const p = (steamId: string, faction: string | null, cash: number, kills = 0, deaths = 0) => ({
 	steamId,
 	name: steamId,
 	faction,
-	cash
+	cash,
+	kills,
+	deaths
 });
 
 describe('Economic War settings', () => {
@@ -33,9 +35,20 @@ describe('Economic War settings', () => {
 		expect(cfg.target).toBe(10_000);
 		expect(() => validateEconomicWar({ target: 500 })).toThrow('1000 to 10000000');
 		expect(() => validateEconomicWar({ target: 20_000_000 })).toThrow();
-		expect(validateEconomicWar({}).announceEvery).toBe(5_000);
+		expect(validateEconomicWar({}).announceEvery).toBe(0);
+		expect(validateEconomicWar({}).spendingCounts).toBe(false);
 		expect(validateEconomicWar({}).timeLimitMinutes).toBe(0);
 		expect(validateEconomicWar({}).timeWarnings).toEqual([5, 1]);
+	});
+	test('the percentages of the target announced: 25, 50, 75, 90 and 95 by default, 1 to 99', () => {
+		expect(validateEconomicWar({}).milestones).toEqual([25, 50, 75, 90, 95]);
+		expect(validateEconomicWar({ milestones: [90, 0, 50, 50, 120] }).milestones).toEqual([
+			50, 90, 99
+		]);
+		expect(validateEconomicWar({ milestones: [] }).milestones).toEqual([]);
+		expect(() => validateEconomicWar({ milestones: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] })).toThrow(
+			'At most 10'
+		);
 	});
 	test('the graces for the starting cash, 30 seconds each by default, 0 to 300', () => {
 		const d = validateEconomicWar({});
@@ -52,6 +65,7 @@ describe('Economic War settings', () => {
 				validateEconomicWar({
 					startMessage: '',
 					progressMessage: '',
+					milestoneMessage: '',
 					winMessage: '',
 					drawMessage: '',
 					timeLeftMessage: ''
@@ -76,6 +90,25 @@ describe('Economic War count', () => {
 		econLook(mem, [p('a', 'Valkyra', 100)], TEAMS, T0 + 4000); // bought a vehicle
 		econLook(mem, [p('a', 'Valkyra', 250)], TEAMS, T0 + 6000); // +150
 		expect(econTally(mem, TEAMS).sides[0].cash).toBe(450);
+	});
+	test('with spending counted, a drop while the counters hold is taken off', () => {
+		const mem = newEconMemory('k', 'Ozeti', T0, false);
+		const look = (cash: number, kills: number, deaths: number, at: number) =>
+			econLook(mem, [p('a', 'Valkyra', cash, kills, deaths)], TEAMS, T0 + at, 0, true);
+		look(1000, 2, 1, 0);
+		look(1600, 4, 1, 2000); // +600
+		look(400, 4, 1, 4000); // bought a vehicle: -1200
+		// shown as nothing earned, while the count below 0 waits to be earned back
+		expect(econTally(mem, TEAMS).sides.find((x) => x.faction === 'Valkyra')?.cash).toBe(0);
+		expect(mem.sides.get('Valkyra')).toBe(-600);
+		expect(econTally(mem, TEAMS).top).toBeNull();
+		look(1400, 6, 1, 6000); // +1000
+		expect(mem.sides.get('Valkyra')).toBe(400);
+		expect(econTally(mem, TEAMS).top).toEqual({ name: 'a', cash: 400 });
+		// the scoreboard started again (a reconnect): the drop is not spending
+		look(0, 0, 0, 8000);
+		look(300, 1, 0, 10_000);
+		expect(mem.sides.get('Valkyra')).toBe(700);
 	});
 	test('a rise goes to the side the player is on now; no side earns for nobody', () => {
 		const mem = newEconMemory('k', 'Ozeti', T0, false);
@@ -176,6 +209,32 @@ describe('Economic War news', () => {
 		expect(mem.step).toBe(3);
 		expect(econStep(cfg, mem, econTally(mem, TEAMS))).toEqual([]);
 	});
+	test('each percentage of the target once, as the leader first reaches it, the highest', () => {
+		const pct = validateEconomicWar({ target: 10_000 });
+		const mem = at({ Valkyra: 2_400 });
+		expect(econStep(pct, mem, econTally(mem, TEAMS))).toEqual([]);
+		mem.sides.set('Valkyra', 2_500);
+		expect(econStep(pct, mem, econTally(mem, TEAMS))[0]).toMatchObject({
+			kind: 'milestone',
+			percent: 25,
+			leader: 'Valkyra'
+		});
+		mem.sides.set('Lonestar', 9_100); // past 50, 75 and 90 at once
+		const news = econStep(pct, mem, econTally(mem, TEAMS));
+		expect(news).toHaveLength(1);
+		expect(news[0]).toMatchObject({ kind: 'milestone', percent: 90, leader: 'Lonestar' });
+		expect(econStep(pct, mem, econTally(mem, TEAMS))).toEqual([]);
+		mem.sides.set('Lonestar', 10_000);
+		expect(econStep(pct, mem, econTally(mem, TEAMS))[0]).toMatchObject({ kind: 'win' });
+	});
+	test('a memory made mid-match takes the percentages passed as said', () => {
+		const pct = validateEconomicWar({ target: 10_000 });
+		const mem = at({ Valkyra: 5_200 });
+		expect(econStep(pct, mem, econTally(mem, TEAMS), true)).toEqual([]);
+		expect([...mem.milestonesTold]).toEqual([25, 50]);
+		mem.sides.set('Valkyra', 7_600);
+		expect(econStep(pct, mem, econTally(mem, TEAMS))[0]).toMatchObject({ percent: 75 });
+	});
 	test('a memory made mid-match takes the steps passed as said', () => {
 		const mem = at({ Valkyra: 6_100 });
 		expect(econStep(cfg, mem, econTally(mem, TEAMS), true)).toEqual([]);
@@ -240,12 +299,14 @@ describe('Economic War across a restart', () => {
 		econLook(mem, [p('a', 'Valkyra', 0)], TEAMS, T0);
 		econLook(mem, [p('a', 'Valkyra', 4_200)], TEAMS, T0 + 2000);
 		mem.step = 2;
+		mem.milestonesTold.add(25);
 		const saved = JSON.parse(JSON.stringify(econSaved(mem, 41)));
 		const back = newEconMemory('k', 'Ozeti', T0 + 90_000, false);
 		expect(econRestore(back, saved, 41)).toBe(true);
 		expect(back.match).toBe(mem.match);
 		expect(econTally(back, TEAMS).sides[0]).toEqual({ faction: 'Valkyra', cash: 4_200 });
 		expect(back.step).toBe(2);
+		expect([...back.milestonesTold]).toEqual([25]);
 		expect(back.clockFrom).toBe(T0);
 		expect(econRestore(newEconMemory('k', 'Ozeti', T0, false), saved, 42)).toBe(false);
 		expect(econRestore(newEconMemory('k', 'Bakurani', T0, false), saved, 41)).toBe(false);

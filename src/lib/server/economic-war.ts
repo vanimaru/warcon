@@ -10,7 +10,9 @@
 // since the player's last look is earned, and goes to the side they are on at this look. Money
 // spent (a vehicle, a loadout) lowers the cash and is not taken off, so buying does not cost a side
 // its progress; a drop is also how the scoreboard starts a player's cash again (a reconnect, a new
-// match), and either way the next rise counts from there. A player's first look only sets where
+// match), and either way the next rise counts from there. With spending counted against a side,
+// a drop is taken off instead, unless the player's kills or deaths dropped with it (the game started
+// their counters again: a reconnect, a new match). A player's first look only sets where
 // they start from, and so do two stretches the rule sets, for the starting cash the game hands out:
 // the first seconds of a match, for everyone, and the first seconds after a player who joins later
 // first takes a side, for them. Players without a side earn for nobody.
@@ -29,7 +31,9 @@ export { ECONOMIC_WAR_DEFAULTS };
 export const ECONOMIC_WAR_DEFAULT_TARGET = 30_000;
 export const ECONOMIC_WAR_MIN_TARGET = 1_000;
 export const ECONOMIC_WAR_MAX_TARGET = 10_000_000;
-export const ECONOMIC_WAR_DEFAULT_STEP = 5_000;
+export const ECONOMIC_WAR_DEFAULT_STEP = 0;
+export const ECONOMIC_WAR_DEFAULT_MILESTONES = [25, 50, 75, 90, 95];
+const MAX_MILESTONES = 10;
 export const ECONOMIC_WAR_MAX_LIMIT_MINUTES = 180;
 export const ECONOMIC_WAR_DEFAULT_TIME_WARNINGS = [5, 1];
 /** A match's first seconds, and a late joiner's first seconds on a side, by default: the game
@@ -48,6 +52,11 @@ export interface EconomicWarConfig {
 	target: number;
 	/** the standings are announced each time the leader passes a multiple of this (0: never) */
 	announceEvery: number;
+	/** percentages of the target announced as the leader first reaches each, lowest first */
+	milestones: number[];
+	/** money spent (a drop in a player's cash while their kills and deaths hold) is taken off their
+	 *  side and them */
+	spendingCounts: boolean;
 	/** the match's time limit in minutes (0: none): the side that earned the most then wins */
 	timeLimitMinutes: number;
 	/** minutes left announced as the limit nears */
@@ -59,6 +68,7 @@ export interface EconomicWarConfig {
 	joinGraceSeconds: number;
 	startMessage: string;
 	progressMessage: string;
+	milestoneMessage: string;
 	winMessage: string;
 	drawMessage: string;
 	timeLeftMessage: string;
@@ -84,11 +94,26 @@ export function validateEconomicWar(c: Record<string, unknown>): EconomicWarConf
 	if (timeWarnings.length > MAX_WARNINGS)
 		throw new ApiError(400, `At most ${MAX_WARNINGS} times left to announce.`);
 	timeWarnings.sort((a, b) => b - a);
+	const milestones: number[] = [];
+	const rawMs = Array.isArray(c.milestones)
+		? c.milestones
+		: c.milestones === undefined
+			? ECONOMIC_WAR_DEFAULT_MILESTONES
+			: [];
+	for (const v of rawMs) {
+		const n = int(v, 0, 0, 99);
+		if (n >= 1 && !milestones.includes(n)) milestones.push(n);
+	}
+	if (milestones.length > MAX_MILESTONES)
+		throw new ApiError(400, `At most ${MAX_MILESTONES} percentages of the target to announce.`);
+	milestones.sort((a, b) => a - b);
 	const text = (k: keyof typeof ECONOMIC_WAR_DEFAULTS) =>
 		c[k] === undefined ? ECONOMIC_WAR_DEFAULTS[k] : str(c[k], 256);
 	return {
 		target,
 		announceEvery: int(c.announceEvery, ECONOMIC_WAR_DEFAULT_STEP, 0, ECONOMIC_WAR_MAX_TARGET),
+		milestones,
+		spendingCounts: c.spendingCounts === true,
 		timeLimitMinutes: int(c.timeLimitMinutes, 0, 0, ECONOMIC_WAR_MAX_LIMIT_MINUTES),
 		timeWarnings,
 		matchGraceSeconds: int(
@@ -105,6 +130,7 @@ export function validateEconomicWar(c: Record<string, unknown>): EconomicWarConf
 		),
 		startMessage: text('startMessage'),
 		progressMessage: text('progressMessage'),
+		milestoneMessage: text('milestoneMessage'),
 		winMessage: text('winMessage'),
 		drawMessage: text('drawMessage'),
 		timeLeftMessage: text('timeLeftMessage')
@@ -144,8 +170,9 @@ export interface EconMemory {
 	sides: Map<string, number>;
 	/** each player's earnings, under the name they last had */
 	earners: Map<string, { name: string; cash: number }>;
-	/** each player's cash at the last look they were on */
+	/** each player's cash at the last look they were on, and their kills and deaths then */
 	last: Map<string, number>;
+	counters: Map<string, { kills: number; deaths: number }>;
 	/** when each player on the list first had a side this match (0: already at the first look) */
 	sidedAt: Map<string, number>;
 	/** a look has been taken: players on a side then are no late joiners */
@@ -154,6 +181,8 @@ export interface EconMemory {
 	graceUntil: number;
 	/** the highest multiple of announceEvery announced */
 	step: number;
+	/** the percentages of the target announced */
+	milestonesTold: Set<number>;
 	/** won, drawn or timed out: nothing more is counted or said this match */
 	decided: boolean;
 	/** when the match's clock started (ms), and whether that is a guess (a memory made mid-match) */
@@ -184,10 +213,12 @@ export const newEconMemory = (
 	sides: new Map(),
 	earners: new Map(),
 	last: new Map(),
+	counters: new Map(),
 	sidedAt: new Map(),
 	looked: false,
 	graceUntil: boundary ? now + graceMs : 0,
 	step: 0,
+	milestonesTold: new Set(),
 	decided: false,
 	clockFrom: now,
 	clockGuessed: !boundary,
@@ -198,20 +229,22 @@ export const newEconMemory = (
 
 /**
  * One look at the player list: each player's rise since their last look goes to the side they are
- * on (a team on the scoreboard), but for the first `joinGraceMs` after a player who was not on a
- * side at the memory's first look takes one; players gone from the list are forgotten (what they
- * earned stays with their side, and back on the list they are late joiners again). Returns whether
- * anything was earned. Mutates `mem`.
+ * on (a team on the scoreboard), and with `spending` each drop while their kills and deaths hold is
+ * taken off, but for the first `joinGraceMs` after a player who was not on a side at the memory's
+ * first look takes one; players gone from the list are forgotten (what they earned stays with their
+ * side, and back on the list they are late joiners again). Returns whether any side's count moved.
+ * Mutates `mem`.
  */
 export function econLook(
 	mem: EconMemory,
-	players: Pick<Player, 'steamId' | 'name' | 'faction' | 'cash'>[],
+	players: Pick<Player, 'steamId' | 'name' | 'faction' | 'cash' | 'kills' | 'deaths'>[],
 	teams: readonly string[],
 	now: number,
-	joinGraceMs = 0
+	joinGraceMs = 0,
+	spending = false
 ): boolean {
 	const on = new Set<string>();
-	let earned = false;
+	let moved = false;
 	const counting = !mem.decided && now >= mem.graceUntil;
 	const first = !mem.looked;
 	mem.looked = true;
@@ -223,24 +256,35 @@ export function econLook(
 		const cash = Number(p.cash);
 		if (!Number.isFinite(cash)) continue;
 		const prev = mem.last.get(p.steamId);
+		const was = mem.counters.get(p.steamId);
+		const kills = Number(p.kills) || 0;
+		const deaths = Number(p.deaths) || 0;
 		mem.last.set(p.steamId, cash);
+		mem.counters.set(p.steamId, { kills, deaths });
 		if (prev === undefined || !counting || !sided || !p.faction) continue;
 		if (now < (mem.sidedAt.get(p.steamId) ?? now) + joinGraceMs) continue;
-		const rise = cash - prev;
-		if (rise <= 0) continue;
-		mem.sides.set(p.faction, (mem.sides.get(p.faction) ?? 0) + rise);
+		const change = cash - prev;
+		if (change === 0) continue;
+		// a drop is money spent only while the counters hold; with them it is the game starting the
+		// player's scoreboard again, and the next look counts from there
+		if (change < 0 && (!spending || !was || kills < was.kills || deaths < was.deaths)) continue;
+		mem.sides.set(p.faction, (mem.sides.get(p.faction) ?? 0) + change);
 		const e = mem.earners.get(p.steamId);
-		mem.earners.set(p.steamId, { name: p.name || p.steamId, cash: (e?.cash ?? 0) + rise });
-		earned = true;
+		mem.earners.set(p.steamId, { name: p.name || p.steamId, cash: (e?.cash ?? 0) + change });
+		moved = true;
 	}
 	for (const id of mem.last.keys()) if (!on.has(id)) mem.last.delete(id);
+	for (const id of mem.counters.keys()) if (!on.has(id)) mem.counters.delete(id);
 	for (const id of mem.sidedAt.keys()) if (!on.has(id)) mem.sidedAt.delete(id);
-	if (earned) mem.dirty = true;
-	return earned;
+	if (moved) mem.dirty = true;
+	return moved;
 }
 
 /** Everyone's last cash forgotten: the next look sets where they start from (an outage, say). */
-export const econRebase = (mem: EconMemory): void => mem.last.clear();
+export const econRebase = (mem: EconMemory): void => {
+	mem.last.clear();
+	mem.counters.clear();
+};
 
 /** The sides' earnings, the scoreboard's teams included at 0, and the top earner. */
 export function econTally(mem: EconMemory, teams: readonly string[] = []): EconTally {
@@ -272,6 +316,7 @@ export function econLeader(t: EconTally): { faction: string; cash: number } | nu
 
 export type EconNews =
 	| { kind: 'progress'; tally: EconTally }
+	| { kind: 'milestone'; percent: number; leader: string; tally: EconTally }
 	| {
 			kind: 'win';
 			winner: string;
@@ -283,9 +328,10 @@ export type EconNews =
 	| { kind: 'time'; minutes: number; tally: EconTally };
 
 /**
- * After a look: the standings each time the leader passes a multiple of announceEvery (once, the
+ * After a look: each percentage of the target as the leader first reaches it (once, the highest
+ * reached), the standings each time the leader passes a multiple of announceEvery (once, the
  * highest passed), and the win as a side reaches the target. A memory restored or made mid-match
- * (`fresh`) takes the steps already passed as said. Mutates `mem`.
+ * (`fresh`) takes the percentages and steps already passed as said. Mutates `mem`.
  */
 export function econStep(
 	cfg: EconomicWarConfig,
@@ -302,16 +348,30 @@ export function econStep(
 		const w = t.sides[0];
 		return [{ kind: 'win', winner: w.faction, cash: w.cash, tally: t, why: 'target' }];
 	}
+	const reached = cfg.milestones.filter(
+		(m) => lead >= (cfg.target * m) / 100 && !mem.milestonesTold.has(m)
+	);
+	for (const m of reached) mem.milestonesTold.add(m);
 	if (fresh) {
 		mem.step = Math.max(mem.step, step);
 		return [];
 	}
+	const news: EconNews[] = [];
+	if (reached.length) {
+		mem.dirty = true;
+		news.push({
+			kind: 'milestone',
+			percent: Math.max(...reached),
+			leader: t.sides[0].faction,
+			tally: t
+		});
+	}
 	if (step > mem.step) {
 		mem.step = step;
 		mem.dirty = true;
-		return [{ kind: 'progress', tally: t }];
+		news.push({ kind: 'progress', tally: t });
 	}
-	return [];
+	return news;
 }
 
 /**
@@ -373,6 +433,8 @@ export interface EconSaved {
 	sides: [string, number][];
 	earners: [string, string, number][];
 	step: number;
+	/** the percentages of the target announced (absent from rows written before them) */
+	milestones?: number[];
 	decided: boolean;
 	clockFrom: number;
 	clockGuessed: boolean;
@@ -391,6 +453,7 @@ export function econSaved(mem: EconMemory, dbMatch: number): EconSaved {
 			.slice(0, SAVED_EARNERS)
 			.map(([id, e]) => [id, e.name, Math.round(e.cash)]),
 		step: mem.step,
+		milestones: [...mem.milestonesTold],
 		decided: mem.decided,
 		clockFrom: mem.clockFrom,
 		clockGuessed: mem.clockGuessed,
@@ -412,7 +475,7 @@ export function econRestore(mem: EconMemory, saved: unknown, dbMatch: number | n
 	mem.sides = new Map(
 		s.sides
 			.filter((e): e is [string, number] => Array.isArray(e) && typeof e[0] === 'string')
-			.map(([f, n]) => [f, Math.max(0, Number(n) || 0)])
+			.map(([f, n]) => [f, Number(n) || 0])
 	);
 	mem.earners = new Map(
 		(Array.isArray(s.earners) ? s.earners : [])
@@ -420,9 +483,12 @@ export function econRestore(mem: EconMemory, saved: unknown, dbMatch: number | n
 				(e): e is [string, string, number] =>
 					Array.isArray(e) && typeof e[0] === 'string' && typeof e[1] === 'string'
 			)
-			.map(([id, name, n]) => [id, { name, cash: Math.max(0, Number(n) || 0) }])
+			.map(([id, name, n]) => [id, { name, cash: Number(n) || 0 }])
 	);
 	mem.step = Math.max(0, Number(s.step) || 0);
+	mem.milestonesTold = new Set(
+		(Array.isArray(s.milestones) ? s.milestones : []).filter((n): n is number => Number.isFinite(n))
+	);
 	mem.decided = s.decided === true;
 	if (Number.isFinite(s.clockFrom) && (s.clockFrom as number) > 0) {
 		mem.clockFrom = s.clockFrom as number;

@@ -135,10 +135,18 @@ export const MESSAGE_RULES: Readonly<Partial<Record<TriggerKind, MessageRule>>> 
 		kept: true
 	},
 	// said to the whole server: `{standings}` is every side's earnings, `{winner}` the side that won
-	// and `{cash}` what it earned, `{top}` the player who earned the most, `{target}` the cash to win
+	// and `{cash}` what it earned, `{top}` the player who earned the most, `{target}` the cash to win,
+	// `{leader}` and `{percent}` the side ahead and the share of the target it reached
 	economic_war: {
-		fields: ['startMessage', 'progressMessage', 'winMessage', 'drawMessage', 'timeLeftMessage'],
-		own: ['target', 'standings', 'winner', 'cash', 'top', 'minutes'],
+		fields: [
+			'startMessage',
+			'progressMessage',
+			'milestoneMessage',
+			'winMessage',
+			'drawMessage',
+			'timeLeftMessage'
+		],
+		own: ['target', 'standings', 'leader', 'percent', 'winner', 'cash', 'top', 'minutes'],
 		player: false,
 		kept: true
 	}

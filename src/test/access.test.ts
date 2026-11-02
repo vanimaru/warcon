@@ -50,6 +50,7 @@ const SILENT_ECON = {
 	target: 20000,
 	startMessage: '',
 	progressMessage: '',
+	milestoneMessage: '',
 	winMessage: '',
 	drawMessage: '',
 	timeLeftMessage: ''

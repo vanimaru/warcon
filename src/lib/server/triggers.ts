@@ -2068,7 +2068,8 @@ async function evalEconomicWar(
 		// the next match: everyone's cash as it stands is where they start from
 		mem = newEconMemory(settingsKey, ctx.status.map, now, true, cfg.matchGraceSeconds * 1000);
 		keepEcon(row.id, ctx.server.id, mem);
-		if (ctx.playersObserved) econLook(mem, ctx.players, teams, now, cfg.joinGraceSeconds * 1000);
+		if (ctx.playersObserved)
+			econLook(mem, ctx.players, teams, now, cfg.joinGraceSeconds * 1000, cfg.spendingCounts);
 		if (cfg.startMessage)
 			out.intents.push({
 				trigger: row,
@@ -2100,7 +2101,8 @@ async function evalEconomicWar(
 	}
 	syncEconClock(mem, now, ctx.status.matchSeconds);
 	if (ctx.recovered) econRebase(mem);
-	else if (ctx.playersObserved) econLook(mem, ctx.players, teams, now, cfg.joinGraceSeconds * 1000);
+	else if (ctx.playersObserved)
+		econLook(mem, ctx.players, teams, now, cfg.joinGraceSeconds * 1000, cfg.spendingCounts);
 	const t = econTally(mem, teams);
 	pushEcon(
 		out,
@@ -2176,6 +2178,14 @@ export function pushEcon(
 				'the standings',
 				{ stage: 'progress', standings: table },
 				`progress:${cfg.announceEvery ? Math.floor(lead / cfg.announceEvery) : lead}`
+			);
+		} else if (n.kind === 'milestone') {
+			broadcast(
+				cfg.milestoneMessage &&
+					say(cfg.milestoneMessage, own({ leader: n.leader, percent: n.percent })),
+				`${n.leader} at ${n.percent}%`,
+				{ stage: 'milestone', percent: n.percent, leader: n.leader, standings: table },
+				`pct:${n.percent}`
 			);
 		} else if (n.kind === 'time') {
 			broadcast(
