@@ -64,7 +64,8 @@
 					: query.weapon.kind === 'vehicles'
 						? 'vehicles'
 						: (board?.weapons.find(
-								(w) => w.cause.toLowerCase() === (query.weapon as { cause: string }).cause.toLowerCase()
+								(w) =>
+									w.cause.toLowerCase() === (query.weapon as { cause: string }).cause.toLowerCase()
 							)?.label ??
 							knownCauses().find(
 								(c) =>
@@ -229,7 +230,7 @@
 	</div>
 </div>
 <p class="note">
-	From the kill feed: a kill of another side counts, suicides, team kills and the environment do not.
-	Classes are the panel's own grouping of the game's weapons. A vehicle's weapons are its guns; a
-	vehicle itself kills by running someone over or when it blows up.
+	From the kill feed: a kill of another side counts, suicides, team kills and the environment do
+	not. Classes are the panel's own grouping of the game's weapons. A vehicle's weapons are its guns;
+	a vehicle itself kills by running someone over or when it blows up.
 </p>

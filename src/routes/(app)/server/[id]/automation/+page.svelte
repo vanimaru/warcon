@@ -220,8 +220,8 @@
 					: form?.kind === 'bounty' && form.bountyReward === 'win' && !canMatch
 						? 'Saving needs the Match control capability as well as Automation: the rule ends the match for the side that wins.'
 						: !canChat
-						? 'Saving needs the Chat capability as well as Automation: the bounty is announced to the server.'
-						: '';
+							? 'Saving needs the Chat capability as well as Automation: the bounty is announced to the server.'
+							: '';
 			case 'empty_reset':
 			case 'restart_skip':
 				return canMatch
@@ -317,8 +317,7 @@
 			)
 		}));
 	/** Whether every tag of a class is in the list, and the list with the class added or taken out. */
-	const hasClass = (list: string[], tags: readonly string[]) =>
-		tags.every((t) => holds(list, t));
+	const hasClass = (list: string[], tags: readonly string[]) => tags.every((t) => holds(list, t));
 	const withClass = (list: string[], tags: readonly string[], on: boolean) =>
 		on
 			? [...list, ...tags.filter((t) => !holds(list, t))]
@@ -401,7 +400,7 @@
 				? '{name} of {faction}: {streak} kills, the most on their side.'
 				: pick === 'manual'
 					? '{name} of {faction}.'
-					: '{name} of {faction}: {streak} kills without dying.'
+					: '{name} of {faction}: {streak} kills without dying.';
 		const ask = pick === 'streak' ? 'Who ends the run?' : 'Who takes them down?';
 		const claim =
 			pick === 'streak' ? "{name} ended {target}'s run of {streak}" : '{name} took down {target}';
@@ -817,8 +816,7 @@
 				: c.reward === 'none' || (!t && !canSlotHere && !canSlotOrg)
 					? 'none'
 					: 'slot';
-		const bountyPick: BountyPickForm =
-			c.pick === 'top' || c.pick === 'manual' ? c.pick : 'streak';
+		const bountyPick: BountyPickForm = c.pick === 'top' || c.pick === 'manual' ? c.pick : 'streak';
 		form = {
 			id: copy ? null : (t?.id ?? null),
 			kind,
@@ -996,9 +994,7 @@
 			survivorFaction: s('survivorFaction', ''),
 			startInfected: n('startInfected', 1),
 			perPlayers: n('perPlayers', 10),
-			milestones: Array.isArray(c.milestones)
-				? (c.milestones as number[]).join(', ')
-				: '25, 10, 5',
+			milestones: Array.isArray(c.milestones) ? (c.milestones as number[]).join(', ') : '25, 10, 5',
 			patientWhisper: s('patientWhisper', INFECTION_DEFAULTS.patientWhisper),
 			// a new rule respawns its first infected on their new side
 			respawnPatients: b('respawnPatients', !t && kind === 'infection'),
@@ -1567,7 +1563,9 @@
 							? `${wanted.length} named (${wanted
 									.slice(0, 3)
 									.map((w) => w.name)
-									.join(', ')}${wanted.length > 3 ? ', …' : ''}), up to ${per} a side, with ${c.minPlayers}+ on`
+									.join(
+										', '
+									)}${wanted.length > 3 ? ', …' : ''}), up to ${per} a side, with ${c.minPlayers}+ on`
 							: `${c.streak} kills without dying, with ${c.minPlayers}+ on`,
 					c.reward === 'none'
 						? 'announced only'
@@ -2335,8 +2333,9 @@
 									checked={!!f.survivorFaction.trim()}
 									onchange={() =>
 										(f.survivorFaction =
-											FACTIONS.find((x) => x.toLowerCase() !== f.infectedFaction.trim().toLowerCase()) ??
-											'')}
+											FACTIONS.find(
+												(x) => x.toLowerCase() !== f.infectedFaction.trim().toLowerCase()
+											) ?? '')}
 								/> Two sides: infected against one survivors' faction</label
 							>
 							<label class="flex items-center gap-2"
@@ -2380,11 +2379,11 @@
 							{#each FACTIONS as x (x)}<option value={x}></option>{/each}
 						</datalist>
 						<p class="text-[12px] text-mist-600">
-							Two sides: everyone not infected is moved onto the survivors' faction at the start, and
-							the third faction is closed (anyone who picks it is moved: onto the survivors' side in
-							the round's first minute, onto the infected after). On a full server that is about two
-							thirds of the players, moved a few a second. Three sides: survivors keep the side they
-							picked, so only the first infected move at the start.
+							Two sides: everyone not infected is moved onto the survivors' faction at the start,
+							and the third faction is closed (anyone who picks it is moved: onto the survivors'
+							side in the round's first minute, onto the infected after). On a full server that is
+							about two thirds of the players, moved a few a second. Three sides: survivors keep the
+							side they picked, so only the first infected move at the start.
 						</p>
 					</fieldset>
 					<fieldset class="space-y-2">
@@ -2424,9 +2423,9 @@
 						<label class="flex items-start gap-2 text-[13px]"
 							><input type="checkbox" class="mt-0.5" bind:checked={f.respawnPatients} />
 							<span
-								>Respawn the first infected: move them with a kill, so they come back at the infected
-								side's spawn instead of switching sides where they stand. Their whisper (below) tells
-								them why.</span
+								>Respawn the first infected: move them with a kill, so they come back at the
+								infected side's spawn instead of switching sides where they stand. Their whisper
+								(below) tells them why.</span
 							></label
 						>
 						<label class="flex items-center gap-2 text-[13px]"
@@ -2444,8 +2443,8 @@
 								disabled={!canMatch}
 								aria-label="Time limit, minutes (0 for none)"
 							/>
-							min from the round's start (0: none): survivors still standing when it runs out win,
-							and the match is ended. Announce the time left at
+							min from the round's start (0: none): survivors still standing when it runs out win, and
+							the match is ended. Announce the time left at
 							<input
 								class="input w-28"
 								type="text"
@@ -2463,9 +2462,9 @@
 							</p>
 						{/if}
 						<label class="flex items-center gap-2 text-[13px]"
-							><input type="checkbox" bind:checked={f.unlockTeams} disabled={!canConfig} /> Unlock
-							teams: switch the game's Lock overpopulated teams off while this rule is on, and put
-							back what was set once it is off (the game reads it from the next match)</label
+							><input type="checkbox" bind:checked={f.unlockTeams} disabled={!canConfig} /> Unlock teams:
+							switch the game's Lock overpopulated teams off while this rule is on, and put back what
+							was set once it is off (the game reads it from the next match)</label
 						>
 						{#if !canConfig}
 							<p class="text-[12px] text-mist-600">
@@ -2510,30 +2509,28 @@
 						])}
 						<p class="text-[12px] text-mist-600">
 							{'{patients}'} names the round's first infected, {'{killer}'} who infected a player,
-							{'{infected}'} and {'{survivors}'} count each side, {'{winner}'} is the faction ahead
-							as the match ends, {'{top}'} the round's top infector and {'{minutes}'} the time left.
-							Empty sends nothing.
+							{'{infected}'} and {'{survivors}'} count each side, {'{winner}'} is the faction ahead as
+							the match ends, {'{top}'} the round's top infector and {'{minutes}'} the time left. Empty
+							sends nothing.
 						</p>
 					</fieldset>
 					<p class="note">
-						The game's own scoring stands: the side with the most players in the control
-						zone scores, and the first to the cap wins. The infected start few, so the
-						survivors score first; each survivor they kill crosses over, until the
-						infection holds the zone. The survivors win by reaching the cap first, or by
-						holding out until the time limit runs out; the infection by reaching the
-						cap, or by leaving nobody uninfected. As the match ends the rule says which.
-						A survivor killed by an infected player joins the infected: moved at once,
-						without the kill, so they respawn on that side. An infected player who
-						switches back is put back; a survivor who joins the infected stays infected,
-						and anyone who joins more than a minute into a round joins the infected. A
-						new match starts a new round. Needs the kill feed. While a Team balance rule
-						is on, the rule waits. The game's Lock overpopulated teams (on by default: a
-						side two ahead takes no more players) can refuse the moves onto the growing
-						infected side: Unlock teams switches it off while the rule is on and puts
-						back what was set once it is off (from the next match, as the game reads
-						it); without it, switch it off on the Config tab: the rule's row warns while
-						it is on. Moves are under Recent actions and in the audit trail; Discord
-						hears only of the ones that fail. One rule per server.
+						The game's own scoring stands: the side with the most players in the control zone
+						scores, and the first to the cap wins. The infected start few, so the survivors score
+						first; each survivor they kill crosses over, until the infection holds the zone. The
+						survivors win by reaching the cap first, or by holding out until the time limit runs
+						out; the infection by reaching the cap, or by leaving nobody uninfected. As the match
+						ends the rule says which. A survivor killed by an infected player joins the infected:
+						moved at once, without the kill, so they respawn on that side. An infected player who
+						switches back is put back; a survivor who joins the infected stays infected, and anyone
+						who joins more than a minute into a round joins the infected. A new match starts a new
+						round. Needs the kill feed. While a Team balance rule is on, the rule waits. The game's
+						Lock overpopulated teams (on by default: a side two ahead takes no more players) can
+						refuse the moves onto the growing infected side: Unlock teams switches it off while the
+						rule is on and puts back what was set once it is off (from the next match, as the game
+						reads it); without it, switch it off on the Config tab: the rule's row warns while it is
+						on. Moves are under Recent actions and in the audit trail; Discord hears only of the
+						ones that fail. One rule per server.
 					</p>
 				{:else if f.kind === 'kill_race'}
 					<fieldset class="space-y-2">
@@ -2588,7 +2585,8 @@
 										><input
 											type="checkbox"
 											checked={hasClass(f.causes, wc.tags)}
-											onchange={(e) => (f.causes = withClass(f.causes, wc.tags, e.currentTarget.checked))}
+											onchange={(e) =>
+												(f.causes = withClass(f.causes, wc.tags, e.currentTarget.checked))}
 										/>
 										{wc.label}</label
 									>
@@ -2619,8 +2617,8 @@
 							{/each}
 							<p class="text-[12px] text-mist-600">
 								Only kills with these count toward a side, the top killer and the standings. Name
-								them in the start message with {'{weapons}'} ("kills with Mosin Nagant, SV98"), so
-								players know. Classes are the panel's own grouping of the game's weapons.
+								them in the start message with {'{weapons}'} ("kills with Mosin Nagant, SV98"), so players
+								know. Classes are the panel's own grouping of the game's weapons.
 							</p>
 						{/if}
 					</fieldset>
@@ -2648,8 +2646,8 @@
 								bind:value={f.timeLimitMinutes}
 								aria-label="Time limit, minutes (0 for none)"
 							/>
-							min from the match's start (0: none): the side with the most kills then wins. Announce
-							the time left at
+							min from the match's start (0: none): the side with the most kills then wins. Announce the
+							time left at
 							<input
 								class="input w-28"
 								type="text"
@@ -2677,15 +2675,15 @@
 							f.drawMessage
 						])}
 						<p class="text-[12px] text-mist-600">
-							{'{standings}'} lists every side's kills, {'{winner}'} and {'{kills}'} the side that
-							won and its count, {'{top}'} the player with the most kills, {'{target}'} the kills to
-							win and {'{minutes}'} the time left. Empty sends nothing.
+							{'{standings}'} lists every side's kills, {'{winner}'} and {'{kills}'} the side that won
+							and its count, {'{top}'} the player with the most kills, {'{target}'} the kills to win and
+							{'{minutes}'} the time left. Empty sends nothing.
 						</p>
 					</fieldset>
 					<p class="note">
 						The game's own scoring still runs: a side that holds the control zone scores, and the
-						first to the cap ends the match. The rule counts each side's kills from the kill feed
-						on top of that, suicides and the environment left out, and the first side to the target
+						first to the cap ends the match. The rule counts each side's kills from the kill feed on
+						top of that, suicides and the environment left out, and the first side to the target
 						wins: the rule announces it and ends the match. A match the game ends first is told by
 						its kills as they stood. The counts are read from the kills stored for the match, so a
 						worker restart keeps them. Needs the kill feed and Match control. One rule per server.
@@ -3907,11 +3905,15 @@
 						{:else}
 							<div class="flex flex-wrap items-center gap-2">
 								Up to
-								<select class="input w-16" bind:value={f.perFaction} aria-label="Bounties on each side">
+								<select
+									class="input w-16"
+									bind:value={f.perFaction}
+									aria-label="Bounties on each side"
+								>
 									{#each [1, 2, 3] as n (n)}<option value={n}>{n}</option>{/each}
 								</select>
-								at once on each side{#if f.bountyPick === 'top'}, the side's top killers once they have
-									at least
+								at once on each side{#if f.bountyPick === 'top'}, the side's top killers once they
+									have at least
 									<input
 										class="input w-20 text-right"
 										type="number"
@@ -3938,8 +3940,8 @@
 						</div>
 						{#if f.bountyPick === 'streak'}
 							<p class="text-[12px] text-mist-600">
-								Team kills do not add to a run; any death ends it. One bounty at a time: the next goes
-								to whoever is on a run once this one ends.
+								Team kills do not add to a run; any death ends it. One bounty at a time: the next
+								goes to whoever is on a run once this one ends.
 							</p>
 						{:else if f.bountyPick === 'top'}
 							<p class="text-[12px] text-mist-600">
@@ -3978,7 +3980,8 @@
 									>
 										<option value="">Add a player who is on…</option>
 										{#each livePlayers.filter((p) => !f.wanted.some((w) => w.steamId === p.steamId)) as p (p.steamId)}
-											<option value={p.steamId}>{p.name}{p.faction ? ` (${p.faction})` : ''}</option>
+											<option value={p.steamId}>{p.name}{p.faction ? ` (${p.faction})` : ''}</option
+											>
 										{/each}
 									</select>
 									<input
@@ -4138,8 +4141,8 @@
 							/>
 							<p class="text-[12px] text-mist-600">
 								Sent as a side reaches the count, just before the panel ends the match.
-								{'{winner}'} is the side, {'{claims}'} its claims, {'{name}'} the player whose claim
-								won it. Claims count per match, so each match is a new hunt.
+								{'{winner}'} is the side, {'{claims}'} its claims, {'{name}'} the player whose claim won
+								it. Claims count per match, so each match is a new hunt.
 							</p>
 						</fieldset>
 					{/if}
@@ -4162,14 +4165,13 @@
 					])}
 					<p class="note">
 						{'{name}'} is the marked player when the bounty is set and the claimer after;
-						{'{target}'} is always the marked player, {'{streak}'} {f.bountyPick === 'streak'
-							? 'their run'
-							: 'their kills in the match when marked'}, {'{faction}'} their side{#if f.bountyReward === 'slot'},
+						{'{target}'} is always the marked player, {'{streak}'}
+						{f.bountyPick === 'streak' ? 'their run' : 'their kills in the match when marked'}, {'{faction}'}
+						their side{#if f.bountyReward === 'slot'},
 							{'{reward}'} “a reserved slot for {Number(f.slotDays)}
 							day{Number(f.slotDays) === 1 ? '' : 's'}”{:else if f.bountyReward === 'win'},
 							{'{goal}'} the {Number(f.winClaims)} claims a side needs, {'{claims}'} the claimer's side's
-							so far{/if}. The bounty and the claim are broadcast
-						to the whole server.
+							so far{/if}. The bounty and the claim are broadcast to the whole server.
 					</p>
 					<p class="note">
 						The first enemy to kill the marked player claims it. Team kills, suicides and deaths to

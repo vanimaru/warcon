@@ -87,26 +87,26 @@
 			orgName={data.server.orgName}
 		/>
 	{:else}
-	<LeaderboardTable
-		{board}
-		{query}
-		{loading}
-		onchange={(q) => (query = q)}
-		hrefFor={(steamId) => `/server/${encodeURIComponent(id)}/players/${steamId}`}
-		orgName={data.server.orgName}
-		showIds
-		{exportHref}
-	/>
-	<p class="note">
-		Kills and deaths are the game's own scoreboard counters, recorded per match; headshots, team
-		kills and streaks come from the kill feed; playtime and cash from player sessions, cash added up
-		match by match. A match counts once it has ended, with the result read against the side the
-		player played. Kills per hour and cash per minute leave seed time out. Names link to the
-		dossier.
-		{#if publicOn}This board is also public at <a
-				href="/s/{encodeURIComponent(id)}/leaderboard"
-				class="text-accent hover:underline">/s/{id}/leaderboard</a
-			>.{/if}
-	</p>
+		<LeaderboardTable
+			{board}
+			{query}
+			{loading}
+			onchange={(q) => (query = q)}
+			hrefFor={(steamId) => `/server/${encodeURIComponent(id)}/players/${steamId}`}
+			orgName={data.server.orgName}
+			showIds
+			{exportHref}
+		/>
+		<p class="note">
+			Kills and deaths are the game's own scoreboard counters, recorded per match; headshots, team
+			kills and streaks come from the kill feed; playtime and cash from player sessions, cash added
+			up match by match. A match counts once it has ended, with the result read against the side the
+			player played. Kills per hour and cash per minute leave seed time out. Names link to the
+			dossier.
+			{#if publicOn}This board is also public at <a
+					href="/s/{encodeURIComponent(id)}/leaderboard"
+					class="text-accent hover:underline">/s/{id}/leaderboard</a
+				>.{/if}
+		</p>
 	{/if}
 </div>
