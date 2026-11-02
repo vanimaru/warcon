@@ -1583,9 +1583,7 @@
 				return [
 					`first side to earn ${fmtCash(Number(c.target))} wins`,
 					`starting cash ${c.matchGraceSeconds ?? 30}s / joiners ${c.joinGraceSeconds ?? 30}s`,
-					Number(c.announceEvery) > 0
-						? `standings every ${fmtCash(Number(c.announceEvery))}`
-						: '',
+					Number(c.announceEvery) > 0 ? `standings every ${fmtCash(Number(c.announceEvery))}` : '',
 					Number(c.timeLimitMinutes) > 0 ? `${c.timeLimitMinutes} min limit` : ''
 				]
 					.filter(Boolean)
@@ -2801,10 +2799,10 @@
 							s on a side.
 						</div>
 						<p class="text-[12px] text-mist-600">
-							The game hands out a starting cash nobody earned; these keep it out of the count (0
-							to 300 seconds each, 0: none). A player's cash when the rule first sees them never
-							counts either way. Set them to how long the game takes to hand it out, as the
-							Players tab's cash column shows.
+							The game hands out a starting cash nobody earned; these keep it out of the count (0 to
+							300 seconds each, 0: none). A player's cash when the rule first sees them never counts
+							either way. Set them to how long the game takes to hand it out, as the Players tab's
+							cash column shows.
 						</p>
 					</fieldset>
 					<fieldset class="space-y-2">
@@ -2832,8 +2830,8 @@
 								bind:value={f.timeLimitMinutes}
 								aria-label="Time limit, minutes (0 for none)"
 							/>
-							min from the match's start (0: none): the side that earned the most then wins.
-							Announce the time left at
+							min from the match's start (0: none): the side that earned the most then wins. Announce
+							the time left at
 							<input
 								class="input w-28"
 								type="text"
@@ -2861,9 +2859,9 @@
 							f.drawMessage
 						])}
 						<p class="text-[12px] text-mist-600">
-							{'{standings}'} lists what every side has earned, {'{winner}'} and {'{cash}'} the side
-							that won and its earnings, {'{top}'} the player who earned the most, {'{target}'} the
-							cash to win and {'{minutes}'} the time left. Empty sends nothing.
+							{'{standings}'} lists what every side has earned, {'{winner}'} and {'{cash}'} the side that
+							won and its earnings, {'{top}'} the player who earned the most, {'{target}'} the cash to
+							win and {'{minutes}'} the time left. Empty sends nothing.
 						</p>
 					</fieldset>
 					<p class="note">
