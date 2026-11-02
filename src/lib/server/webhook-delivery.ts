@@ -170,6 +170,7 @@ const ACTION_TITLES: Record<string, string> = {
 	'trigger.weather_cycle': 'Trigger · weather cycle',
 	'trigger.infection': 'Trigger · infection',
 	'trigger.kill_race': 'Trigger · kill race',
+	'trigger.economic_war': 'Trigger · economic war',
 	'player.note': 'Player note',
 	'player.watch': 'Watchlist',
 	'list.add': 'Org list · added',

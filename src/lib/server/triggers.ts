@@ -31,6 +31,8 @@
 //                joins them (infection.ts; the infections are acted on in feed-events.ts)
 //   kill_race    a team deathmatch: the first side to a number of kills wins and the match is
 //                ended (kill-race.ts; counted as kills arrive, in feed-events.ts)
+//   economic_war   a race to money: the first side to earn an amount of cash wins and the match is
+//                ended (economic-war.ts; counted from the player list at each look)
 // The worker evaluates them on every observation and writes the actions they want to the outbox
 // (outbox.ts delivers, and every delivery lands in the audit trail as category "trigger"). A dry
 // run replays the last 24 hours from the samples and sessions tables so a rule can be checked
@@ -55,6 +57,7 @@ import { writeAudit } from './audit';
 import { emit } from './events';
 import {
 	kills,
+	matches,
 	outbox,
 	playerSessions,
 	samples,
@@ -266,6 +269,29 @@ import {
 	type KillRaceConfig,
 	type RaceNews
 } from './kill-race';
+import {
+	econAtMatchEnd,
+	econClock,
+	econLook,
+	econRebase,
+	econRestore,
+	econSaved,
+	econStandings,
+	econStep,
+	econTally,
+	economicWarSettingsKey,
+	economicWarSpeaks,
+	ECONOMIC_WAR_GRACE_MS,
+	ECONOMIC_WAR_SAVE_MS,
+	keepEcon,
+	keepEcons,
+	knownEcon,
+	newEconMemory,
+	syncEconClock,
+	type EconNews,
+	type EconomicWarConfig
+} from './economic-war';
+import { fmtCash } from '$lib/cash';
 import { mapName } from '$lib/format';
 import type { TeamLock } from '$lib/team-lock';
 import { statsIn, usesStats } from '$lib/placeholders';
@@ -384,6 +410,7 @@ const RULE_NEEDS: Record<
 	two_teams: ['players.move', 'moves players between teams'],
 	infection: ['players.move', 'moves players between teams'],
 	kill_race: ['match.control', 'ends the match'],
+	economic_war: ['match.control', 'ends the match'],
 	afk_protection: ['players.kill', 'kills players'],
 	name_change: ['players.kick', 'flags or kicks players'],
 	rotation_shuffle: ['config.apply', 'rewrites the rotation in the config document'],
@@ -445,6 +472,8 @@ function ruleAlsoNeeds(kind: TriggerKind, config: unknown): [Capability, string]
 	if (kind === 'infection' && infectionSpeaks(config as Partial<InfectionConfig> | null))
 		return ['chat.send', 'messages players'];
 	if (kind === 'kill_race' && killRaceSpeaks(config as Partial<KillRaceConfig> | null))
+		return ['chat.send', 'messages players'];
+	if (kind === 'economic_war' && economicWarSpeaks(config as Partial<EconomicWarConfig> | null))
 		return ['chat.send', 'messages players'];
 	return null;
 }
@@ -671,7 +700,8 @@ export const SETTINGS_KEYS: Partial<Record<string, (config: unknown) => string>>
 	restart_skip: () => RESTART_SKIP_KEY,
 	weather_cycle: (c) => weatherCycleSettingsKey(c as WeatherCycleConfig),
 	infection: (c) => infectionSettingsKey(c as InfectionConfig),
-	kill_race: (c) => killRaceSettingsKey(c as KillRaceConfig)
+	kill_race: (c) => killRaceSettingsKey(c as KillRaceConfig),
+	economic_war: (c) => economicWarSettingsKey(c as EconomicWarConfig)
 };
 
 /**
@@ -936,6 +966,7 @@ export async function evaluateTriggers(
 	// Stats are read only for a message that uses them, once per player whichever rules ask.
 	const read = statsReader(env, ctx.server.id);
 	keepRaces(ctx.server.id, new Set(rows.filter((r) => r.kind === 'kill_race').map((r) => r.id)));
+	keepEcons(ctx.server.id, new Set(rows.filter((r) => r.kind === 'economic_war').map((r) => r.id)));
 	keepInfections(
 		ctx.server.id,
 		new Set(rows.filter((r) => r.kind === 'infection').map((r) => r.id))
@@ -1008,6 +1039,10 @@ export async function evaluateTriggers(
 				case 'kill_race':
 					// Counted as kills arrive (feed-events.ts); a look keeps the clock and the match's end.
 					evalKillRace(ctx, row, row.config as KillRaceConfig, out);
+					break;
+				case 'economic_war':
+					// Counted from the player list's cash at each look.
+					await evalEconomicWar(env, ctx, row, row.config as EconomicWarConfig, out);
 					break;
 				case 'live_name':
 					// Written at the look itself, after the rules (live-name-write.ts): no action is queued.
@@ -1992,6 +2027,195 @@ export function pushRace(
 				id: row.id,
 				lastFiredAt: new Date(),
 				lastResult: `A draw at ${kills} kills (${table})`.slice(0, 300)
+			});
+		}
+	}
+}
+
+/** The panel's open match on a server (matches.id), or null between matches. */
+async function openMatchId(env: Env, serverId: string): Promise<number | null> {
+	const [m] = await env.db
+		.select({ id: matches.id })
+		.from(matches)
+		.where(and(eq(matches.serverId, serverId), isNull(matches.endedAt)))
+		.orderBy(desc(matches.id))
+		.limit(1);
+	return m ? Number(m.id) : null;
+}
+
+/**
+ * An Economic War rule at one look (economic-war.ts): as a match ends, the war as its money stood
+ * (when the game's cap came first) and the next match's opening line; between, each player's cash
+ * earned since the last look goes to their side, the standings and the win as the leader passes
+ * the steps and the target, and the time limit's clock. The count is written to the rule's row now
+ * and then, so a worker restart in the same match takes it up again.
+ */
+async function evalEconomicWar(
+	env: Env,
+	ctx: TickContext,
+	row: TriggerRow,
+	cfg: EconomicWarConfig,
+	out: Evaluation
+): Promise<void> {
+	const now = ctx.ts.getTime();
+	const settingsKey = economicWarSettingsKey(cfg);
+	const teams = ctx.status.scores.map((f) => f.name).filter(Boolean);
+	const say = (text: string, own: MessageVars) =>
+		renderTemplate(text, keptVars(vars(ctx, null, {}, own)), MAX_CHAT);
+	let mem = knownEcon(row.id, settingsKey);
+	if (ctx.matchEnd) {
+		if (mem) pushEcon(out, row, cfg, mem.match, econAtMatchEnd(mem, econTally(mem, teams)), say);
+		// the next match: everyone's cash as it stands is where they start from
+		mem = newEconMemory(settingsKey, ctx.status.map, now, true);
+		keepEcon(row.id, ctx.server.id, mem);
+		if (ctx.playersObserved) econLook(mem, ctx.players, teams, now);
+		if (cfg.startMessage)
+			out.intents.push({
+				trigger: row,
+				action: 'broadcast',
+				params: {
+					message: say(cfg.startMessage, { target: fmtCash(cfg.target) }),
+					rule: settingsKey
+				},
+				target: 'start',
+				okMessage: 'Announced the economic war.',
+				detail: { match: mem.match, stage: 'start', target: cfg.target },
+				steamId: null,
+				dedupeKey: key(row, mem.match, 'start')
+			});
+		return;
+	}
+	let fresh = false;
+	if (!mem || mem.map !== ctx.status.map) {
+		// A worker that has no memory of the rule (a restart, the rule switched on or changed) takes
+		// up what the row holds for this match; another map is another match, its end unseen.
+		const restart = !mem;
+		mem = newEconMemory(settingsKey, ctx.status.map, now, false);
+		keepEcon(row.id, ctx.server.id, mem);
+		if (restart) {
+			const open = await openMatchId(env, ctx.server.id);
+			if (econRestore(mem, row.state, open)) mem.savedAt = now;
+		}
+		fresh = true;
+	}
+	syncEconClock(mem, now, ctx.status.matchSeconds);
+	if (ctx.recovered) econRebase(mem);
+	else if (ctx.playersObserved) econLook(mem, ctx.players, teams, now);
+	const t = econTally(mem, teams);
+	pushEcon(
+		out,
+		row,
+		cfg,
+		mem.match,
+		[...econStep(cfg, mem, t, fresh), ...econClock(cfg, mem, t, now)],
+		say
+	);
+	if (mem.dirty && (mem.decided || now - mem.savedAt >= ECONOMIC_WAR_SAVE_MS)) {
+		// the panel's row of the match is read once the match is well under way (not at its
+		// first look, when the new row may not be written yet)
+		if (mem.dbMatch === null && now - mem.clockFrom >= ECONOMIC_WAR_GRACE_MS)
+			mem.dbMatch = await openMatchId(env, ctx.server.id);
+		if (mem.dbMatch !== null) {
+			out.updates.push({ id: row.id, state: econSaved(mem, mem.dbMatch) });
+			mem.dirty = false;
+			mem.savedAt = now;
+		}
+	}
+}
+
+/**
+ * The actions of an Economic War rule's news: the standings, the time left, and the result, with
+ * the match ended when the war decided it (the target reached, or the time up). Keyed by the match,
+ * so a restart that decides it again sends nothing twice.
+ */
+export function pushEcon(
+	out: Evaluation,
+	row: TriggerRow,
+	cfg: EconomicWarConfig,
+	match: string,
+	news: EconNews[],
+	say: (text: string, own: MessageVars) => string
+): void {
+	const config = economicWarSettingsKey(cfg);
+	const broadcast = (text: string, subject: string, detail: Record<string, unknown>, k: string) => {
+		if (!text) return;
+		out.intents.push({
+			trigger: row,
+			action: 'broadcast',
+			params: { message: text, rule: config },
+			target: text,
+			okMessage: `Announced ${subject}.`,
+			detail: { match, ...detail },
+			steamId: null,
+			dedupeKey: key(row, match, k)
+		});
+	};
+	const end = (why: string) =>
+		out.intents.push({
+			trigger: row,
+			action: 'endMatch',
+			params: { rule: config },
+			target: 'match',
+			okMessage: `Ended the match: ${why}.`,
+			detail: { match, stage: 'end' },
+			steamId: null,
+			dedupeKey: key(row, match, 'end')
+		});
+	for (const n of news) {
+		const table = econStandings(n.tally);
+		const own = (extra: MessageVars = {}): MessageVars => ({
+			target: fmtCash(cfg.target),
+			standings: table,
+			top: n.tally.top ? `${n.tally.top.name} (${fmtCash(n.tally.top.cash)})` : 'nobody',
+			...extra
+		});
+		if (n.kind === 'progress') {
+			const lead = n.tally.sides[0]?.cash ?? 0;
+			broadcast(
+				cfg.progressMessage && say(cfg.progressMessage, own()),
+				'the standings',
+				{ stage: 'progress', standings: table },
+				`progress:${cfg.announceEvery ? Math.floor(lead / cfg.announceEvery) : lead}`
+			);
+		} else if (n.kind === 'time') {
+			broadcast(
+				cfg.timeLeftMessage && say(cfg.timeLeftMessage, own({ minutes: n.minutes })),
+				`${n.minutes} min left`,
+				{ stage: 'time', minutes: n.minutes },
+				`time:${n.minutes}`
+			);
+		} else if (n.kind === 'win') {
+			const cash = fmtCash(n.cash);
+			broadcast(
+				cfg.winMessage && say(cfg.winMessage, own({ winner: n.winner, cash })),
+				`${n.winner}'s win`,
+				{ stage: 'win', winner: n.winner, cash: n.cash, why: n.why, standings: table },
+				'result'
+			);
+			if (n.why !== 'match')
+				end(
+					n.why === 'target'
+						? `${n.winner} earned ${fmtCash(cfg.target)}`
+						: `time is up, ${n.winner} ahead on cash earned`
+				);
+			out.updates.push({
+				id: row.id,
+				lastFiredAt: new Date(),
+				lastResult: `${n.winner} won with ${cash} earned (${table})`.slice(0, 300)
+			});
+		} else {
+			const cash = fmtCash(n.tally.sides[0]?.cash ?? 0);
+			broadcast(
+				cfg.drawMessage && say(cfg.drawMessage, own({ cash })),
+				'a draw',
+				{ stage: 'draw', why: n.why, standings: table },
+				'result'
+			);
+			if (n.why === 'time') end('time is up, a draw on cash earned');
+			out.updates.push({
+				id: row.id,
+				lastFiredAt: new Date(),
+				lastResult: `A draw at ${cash} earned (${table})`.slice(0, 300)
 			});
 		}
 	}
@@ -3106,6 +3330,62 @@ export async function dryRun(
 		result.notes.push(
 			'Faction switches are not kept in the session history, so there is nothing to replay; the rule fires live when a player moves from one faction to another.'
 		);
+		return result;
+	}
+	if (kind === 'economic_war') {
+		// No player's cash is kept look by look; the samples keep the cash each side held, a minute
+		// or so apart, which is what a replay can go on: a side's rise from one sample to the next is
+		// taken as earned. Money spent between two samples hides as much earned, and a player who
+		// joins with cash brings it in, so it is an estimate.
+		const c = cfg as EconomicWarConfig;
+		const [matchRows, sampleRows] = await Promise.all([
+			env.db.execute<{ id: number; startedAt: Date; endedAt: Date | null }>(sql`
+				SELECT id, started_at AS "startedAt", ended_at AS "endedAt"
+				  FROM matches
+				 WHERE server_id = ${server.id} AND started_at < ${to}
+				   AND (ended_at IS NULL OR ended_at >= ${from})
+				 ORDER BY started_at ASC`),
+			env.db.execute<{ ts: Date; cash: { name: string; cash: number }[] | null }>(sql`
+				SELECT ts, cash FROM samples
+				 WHERE server_id = ${server.id} AND ts >= ${from} AND ok AND cash IS NOT NULL
+				 ORDER BY ts ASC LIMIT ${REPLAY_ROWS_MAX}`)
+		]);
+		const spans = matchRows.map((m) => ({
+			id: Number(m.id),
+			from: new Date(m.startedAt).getTime(),
+			to: m.endedAt ? new Date(m.endedAt).getTime() : Infinity
+		}));
+		const held = new Map<number, Map<string, number>>();
+		const earned = new Map<number, Map<string, number>>();
+		const done = new Set<number>();
+		for (const s of sampleRows) {
+			const at = new Date(s.ts).getTime();
+			const m = spans.find((x) => at >= x.from && at < x.to);
+			if (!m || done.has(m.id) || !Array.isArray(s.cash)) continue;
+			const before = held.get(m.id);
+			const now = new Map(
+				s.cash.filter((f) => f && f.name).map((f) => [f.name, Number(f.cash) || 0])
+			);
+			held.set(m.id, now);
+			if (!before || at < m.from + ECONOMIC_WAR_GRACE_MS) continue;
+			const sides = earned.get(m.id) ?? new Map<string, number>();
+			earned.set(m.id, sides);
+			for (const [f, n] of now) {
+				const rise = n - (before.get(f) ?? n);
+				if (rise <= 0) continue;
+				const total = (sides.get(f) ?? 0) + rise;
+				sides.set(f, total);
+				if (total >= c.target && !done.has(m.id)) {
+					done.add(m.id);
+					push(new Date(at), `${f} earns ${fmtCash(c.target)}: the match is ended`);
+				}
+			}
+		}
+		result.notes.push(
+			`Estimated from the cash each side held in the samples of ${earned.size} match${earned.size === 1 ? '' : 'es'} in the last 24 hours: money spent between two samples hides as much earned, so the live rule, which reads every player's cash at each look, reaches the target sooner. A time limit is not replayed.`
+		);
+		if (sampleRows.length === REPLAY_ROWS_MAX)
+			result.notes.push(`Only the first ${REPLAY_ROWS_MAX} samples of the window were replayed.`);
 		return result;
 	}
 	if (kind === 'kill_race') {

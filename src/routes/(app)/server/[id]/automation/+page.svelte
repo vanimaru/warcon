@@ -7,6 +7,8 @@
 	import { can } from '$lib/capabilities';
 	import { INFECTION_DEFAULTS } from '$lib/infection-defaults';
 	import { KILL_RACE_DEFAULTS } from '$lib/kill-race-defaults';
+	import { ECONOMIC_WAR_DEFAULTS } from '$lib/economic-war-defaults';
+	import { fmtCash } from '$lib/cash';
 	import {
 		causeKind,
 		causeLabel,
@@ -237,6 +239,10 @@
 					: !canMatch
 						? 'Saving needs the Match control capability as well as Automation: the rule ends the match.'
 						: '';
+			case 'economic_war':
+				return canMatch
+					? ''
+					: 'Saving needs the Match control capability as well as Automation: the rule ends the match.';
 			case 'infection':
 				return !data.feed
 					? 'Needs the kill feed, which is off on this server. Turn it on under Config.'
@@ -385,7 +391,8 @@
 									: kind === 'empty_reset' ||
 										  kind === 'restart_skip' ||
 										  kind === 'weather_cycle' ||
-										  kind === 'kill_race'
+										  kind === 'kill_race' ||
+										  kind === 'economic_war'
 										? 'Needs Match control'
 										: '';
 	/**
@@ -665,6 +672,8 @@
 		progressMessage: string;
 		winMessage: string;
 		drawMessage: string;
+		/** an Economic War rule's cash to win (its steps, limit and texts are the Kill race's fields) */
+		econTarget: number;
 	}
 	/** An Infection rule's texts, in the order a round goes, with what each is for. */
 	const INFECTION_TEXTS = [
@@ -681,6 +690,14 @@
 	] as const;
 	/** A Kill race rule's texts, in the order a match goes, with what each is for. */
 	const RACE_TEXTS = [
+		['startMessage', 'As a match starts'],
+		['progressMessage', 'Each time the leader passes a step'],
+		['timeLeftMessage', 'As the time left falls to each warning'],
+		['winMessage', 'When a side wins'],
+		['drawMessage', 'When the time runs out on a tie']
+	] as const;
+	/** An Economic War rule's texts, in the order a match goes, with what each is for. */
+	const ECON_TEXTS = [
 		['startMessage', 'As a match starts'],
 		['progressMessage', 'Each time the leader passes a step'],
 		['timeLeftMessage', 'As the time left falls to each warning'],
@@ -793,6 +810,8 @@
 		const s = (k: string, d: string) => (typeof c[k] === 'string' ? (c[k] as string) : d);
 		const n = (k: string, d: number) => (typeof c[k] === 'number' ? (c[k] as number) : d);
 		const b = (k: string, d: boolean) => (typeof c[k] === 'boolean' ? (c[k] as boolean) : d);
+		// a Kill race and an Economic War share the fields of their texts, each with its own defaults
+		const raceTexts = kind === 'economic_war' ? ECONOMIC_WAR_DEFAULTS : KILL_RACE_DEFAULTS;
 		// a new Kill distance rule kicks, or bans for an author who may ban but not kick, or warns for
 		// one who may only whisper
 		const distanceAction: Form['distanceAction'] =
@@ -891,7 +910,9 @@
 					? INFECTION_DEFAULTS.startMessage
 					: kind === 'kill_race'
 						? KILL_RACE_DEFAULTS.startMessage
-						: 'New match on {map}. Good luck!'
+						: kind === 'economic_war'
+							? ECONOMIC_WAR_DEFAULTS.startMessage
+							: 'New match on {map}. Good luck!'
 			),
 			warnAt: n('warnAt', 2),
 			warnMessage: s(
@@ -1017,15 +1038,18 @@
 				'timeLeftMessage',
 				kind === 'kill_race'
 					? KILL_RACE_DEFAULTS.timeLeftMessage
-					: INFECTION_DEFAULTS.timeLeftMessage
+					: kind === 'economic_war'
+						? ECONOMIC_WAR_DEFAULTS.timeLeftMessage
+						: INFECTION_DEFAULTS.timeLeftMessage
 			),
 			raceTarget: n('target', 100),
 			headshotsOnly: b('headshotsOnly', false),
 			teamKillsSubtract: b('teamKillsSubtract', false),
-			announceEvery: n('announceEvery', 25),
-			progressMessage: s('progressMessage', KILL_RACE_DEFAULTS.progressMessage),
-			winMessage: s('winMessage', KILL_RACE_DEFAULTS.winMessage),
-			drawMessage: s('drawMessage', KILL_RACE_DEFAULTS.drawMessage)
+			announceEvery: n('announceEvery', kind === 'economic_war' ? 5000 : 25),
+			progressMessage: s('progressMessage', raceTexts.progressMessage),
+			winMessage: s('winMessage', raceTexts.winMessage),
+			drawMessage: s('drawMessage', raceTexts.drawMessage),
+			econTarget: n('target', 30000)
 		};
 		dry = null;
 		pendingSel =
@@ -1239,6 +1263,21 @@
 					headshotsOnly: f.headshotsOnly,
 					causes: f.causes,
 					teamKillsSubtract: f.teamKillsSubtract,
+					announceEvery: Number(f.announceEvery) || 0,
+					timeLimitMinutes: Number(f.timeLimitMinutes) || 0,
+					timeWarnings: f.timeWarnings
+						.split(/[\s,]+/)
+						.filter(Boolean)
+						.map(Number),
+					startMessage: f.startMessage,
+					progressMessage: f.progressMessage,
+					winMessage: f.winMessage,
+					drawMessage: f.drawMessage,
+					timeLeftMessage: f.timeLeftMessage
+				};
+			case 'economic_war':
+				return {
+					target: Number(f.econTarget),
 					announceEvery: Number(f.announceEvery) || 0,
 					timeLimitMinutes: Number(f.timeLimitMinutes) || 0,
 					timeWarnings: f.timeWarnings
@@ -1529,6 +1568,16 @@
 						: '',
 					c.teamKillsSubtract ? 'team kills count against' : '',
 					Number(c.announceEvery) > 0 ? `standings every ${c.announceEvery}` : '',
+					Number(c.timeLimitMinutes) > 0 ? `${c.timeLimitMinutes} min limit` : ''
+				]
+					.filter(Boolean)
+					.join(' · ');
+			case 'economic_war':
+				return [
+					`first side to earn ${fmtCash(Number(c.target))} wins`,
+					Number(c.announceEvery) > 0
+						? `standings every ${fmtCash(Number(c.announceEvery))}`
+						: '',
 					Number(c.timeLimitMinutes) > 0 ? `${c.timeLimitMinutes} min limit` : ''
 				]
 					.filter(Boolean)
@@ -1921,6 +1970,13 @@
 		{:else if r.kind === 'kill_race'}
 			<span
 				>Replayed the last 24 h on this server: a side would have won <b
+					class={r.fires ? 'text-warn' : 'text-ok'}>{r.fires}</b
+				>
+				match{r.fires === 1 ? '' : 'es'}</span
+			>
+		{:else if r.kind === 'economic_war'}
+			<span
+				>Estimated over the last 24 h on this server: a side would have won <b
 					class={r.fires ? 'text-warn' : 'text-ok'}>{r.fires}</b
 				>
 				match{r.fires === 1 ? '' : 'es'}</span
@@ -2687,6 +2743,97 @@
 						wins: the rule announces it and ends the match. A match the game ends first is told by
 						its kills as they stood. The counts are read from the kills stored for the match, so a
 						worker restart keeps them. Needs the kill feed and Match control. One rule per server.
+					</p>
+				{:else if f.kind === 'economic_war'}
+					<fieldset class="space-y-2">
+						<legend class="field-label">To win</legend>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							The first side to earn $
+							<input
+								class="input w-32 text-right"
+								type="number"
+								min="1000"
+								max="10000000"
+								step="100"
+								bind:value={f.econTarget}
+								aria-label="Cash to win"
+								required
+							/>
+							wins, and the match is ended.
+						</div>
+						<p class="text-[12px] text-mist-600">
+							What counts is the cash each player earns while on a side, added up per side. Money
+							spent (a vehicle, a loadout) is not taken off, and the starting cash of a match does
+							not count.
+						</p>
+					</fieldset>
+					<fieldset class="space-y-2">
+						<legend class="field-label">Along the way</legend>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							Announce the standings every $
+							<input
+								class="input w-28 text-right"
+								type="number"
+								min="0"
+								max="10000000"
+								step="100"
+								bind:value={f.announceEvery}
+								aria-label="Announce the standings every, cash (0 for never)"
+							/>
+							the leader earns (0: never)
+						</div>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							Time limit
+							<input
+								class="input w-20 text-right"
+								type="number"
+								min="0"
+								max="180"
+								bind:value={f.timeLimitMinutes}
+								aria-label="Time limit, minutes (0 for none)"
+							/>
+							min from the match's start (0: none): the side that earned the most then wins.
+							Announce the time left at
+							<input
+								class="input w-28"
+								type="text"
+								data-plain
+								bind:value={f.timeWarnings}
+								placeholder="5, 1"
+								aria-label="Minutes left to announce"
+							/>
+							min
+						</div>
+					</fieldset>
+					<fieldset class="space-y-3">
+						<legend class="field-label">Messages (each optional)</legend>
+						{#each ECON_TEXTS as [k, title] (k)}
+							<label class="block space-y-1 text-[13px]"
+								><span class="text-mist-400">{title}</span>
+								<input class="input" type="text" bind:value={f[k]} maxlength={MAX_CHAT} /></label
+							>
+						{/each}
+						{@render placeholders('economic_war', [
+							f.startMessage,
+							f.progressMessage,
+							f.timeLeftMessage,
+							f.winMessage,
+							f.drawMessage
+						])}
+						<p class="text-[12px] text-mist-600">
+							{'{standings}'} lists what every side has earned, {'{winner}'} and {'{cash}'} the side
+							that won and its earnings, {'{top}'} the player who earned the most, {'{target}'} the
+							cash to win and {'{minutes}'} the time left. Empty sends nothing.
+						</p>
+					</fieldset>
+					<p class="note">
+						The game's own scoring still runs: a side that holds the control zone scores, and the
+						first to the cap ends the match. The rule reads every player's cash on each look at the
+						player list (every couple of seconds while people are on): a rise goes to the side the
+						player is on, and the first side to the target wins: the rule announces it and ends the
+						match. A match the game ends first is told by the cash as it stood. The count is kept
+						across a worker restart in the same match, less the last few seconds. Needs Match
+						control. One rule per server.
 					</p>
 				{:else if f.kind === 'restart_skip'}
 					<div class="space-y-1.5 text-[13px]">

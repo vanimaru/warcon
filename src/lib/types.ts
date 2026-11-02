@@ -588,7 +588,8 @@ export type TriggerKind =
 	| 'restart_skip'
 	| 'weather_cycle'
 	| 'infection'
-	| 'kill_race';
+	| 'kill_race'
+	| 'economic_war';
 
 export interface TriggerView {
 	id: string;

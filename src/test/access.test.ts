@@ -45,6 +45,15 @@ const SILENT_RACE = {
 	drawMessage: '',
 	timeLeftMessage: ''
 };
+/** An Economic War rule that says nothing: it needs only Match control, to end the match. */
+const SILENT_ECON = {
+	target: 20000,
+	startMessage: '',
+	progressMessage: '',
+	winMessage: '',
+	drawMessage: '',
+	timeLeftMessage: ''
+};
 /** An Infection rule that says nothing: it needs only Move. */
 const SILENT_INFECTION = {
 	infectedFaction: 'Manticore',
@@ -562,6 +571,7 @@ describe.skipIf(!hasTestDb)('access', () => {
 				['two_teams', { closedFaction: 'Lonestar' }, 'players.move'],
 				['infection', SILENT_INFECTION, 'players.move'],
 				['kill_race', SILENT_RACE, 'match.control'],
+				['economic_war', SILENT_ECON, 'match.control'],
 				['afk_protection', {}, 'players.kill'],
 				['afk_watch', {}, 'players.kick'],
 				['afk_watch', { action: 'alert' }, 'players.kick'],
@@ -1443,7 +1453,8 @@ describe.skipIf(!hasTestDb)('access', () => {
 				restart_skip: {},
 				weather_cycle: { lightings: ['DayClear', 'DayLateRain'] },
 				infection: SILENT_INFECTION,
-				kill_race: SILENT_RACE
+				kill_race: SILENT_RACE,
+				economic_war: SILENT_ECON
 			};
 			const save = (kind: string, name: string, config: Record<string, unknown>) =>
 				api(w, 'owner', 'POST api/servers/[id]/triggers', {

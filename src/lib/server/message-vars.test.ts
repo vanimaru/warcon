@@ -253,6 +253,7 @@ describe('the catalogue and the rules’ settings', () => {
 		name_change: { action: 'kick', reason: 'a' },
 		infection: { infectedFaction: 'Manticore', survivorFaction: 'Lonestar' },
 		kill_race: { target: 50 },
+		economic_war: { target: 20000 },
 		bounty: { reward: 'win', winClaims: 3 }
 	};
 	test('every message field the catalogue names is a text the rule keeps', () => {

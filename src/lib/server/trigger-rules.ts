@@ -17,6 +17,7 @@ import { validateRestartSkip, type RestartSkipConfig } from './restart-skip';
 import { validateWeatherCycle, type WeatherCycleConfig } from './weather-cycle';
 import { validateInfection, type InfectionConfig } from './infection';
 import { validateKillRace, type KillRaceConfig } from './kill-race';
+import { validateEconomicWar, type EconomicWarConfig } from './economic-war';
 import { steamIdList } from './steam';
 import type { LiveNameConfig } from '$lib/live-name';
 import { causeTags } from './cause-tags';
@@ -52,7 +53,8 @@ export const TRIGGER_KINDS: TriggerKind[] = [
 	'afk_watch',
 	'weather_cycle',
 	'infection',
-	'kill_race'
+	'kill_race',
+	'economic_war'
 ];
 export const TRIGGER_LABELS: Record<TriggerKind, string> = {
 	welcome: 'Welcome whisper',
@@ -78,7 +80,8 @@ export const TRIGGER_LABELS: Record<TriggerKind, string> = {
 	afk_watch: 'AFK watch',
 	weather_cycle: 'Weather cycle',
 	infection: 'Infection',
-	kill_race: 'Kill race'
+	kill_race: 'Kill race',
+	economic_war: 'Economic War'
 };
 
 export interface WelcomeConfig {
@@ -249,7 +252,8 @@ export type TriggerConfig =
 	| AfkWatchConfig
 	| WeatherCycleConfig
 	| InfectionConfig
-	| KillRaceConfig;
+	| KillRaceConfig
+	| EconomicWarConfig;
 
 /** A kick reason: not chat, so not held to the game's chat cap. */
 export const MAX_REASON = 200;
@@ -462,6 +466,8 @@ export function validateConfig(kind: TriggerKind, raw: unknown): TriggerConfig {
 			return validateInfection(c);
 		case 'kill_race':
 			return validateKillRace(c);
+		case 'economic_war':
+			return validateEconomicWar(c);
 	}
 }
 

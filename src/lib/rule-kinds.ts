@@ -107,6 +107,12 @@ export const RULE_KINDS: { kind: TriggerKind; group: RuleGroup; label: string; b
 		blurb: 'A team deathmatch: the first side to a number of kills wins, and the match is ended.'
 	},
 	{
+		kind: 'economic_war',
+		group: 'In play',
+		label: 'Economic War',
+		blurb: 'A race to money: the first side to earn an amount of cash wins, and the match is ended.'
+	},
+	{
 		kind: 'seed_reward',
 		group: 'Seeding and rewards',
 		label: 'Seeding reward',
@@ -172,8 +178,8 @@ export const RULE_KINDS: { kind: TriggerKind; group: RuleGroup; label: string; b
  * rules would each undo the other's order, two Live server name rules would each write their own
  * name over the other's, two Skip map after restart rules would end the match twice, two Weather
  * cycle rules would each change the weather on a clock of their own, two Infection rules would each
- * move players to sides of their own, two Kill race rules would each end the match on a count of their
- * own. The picker opens the one a server has.
+ * move players to sides of their own, two Kill race or Economic War rules would each end the
+ * match on a count of their own. The picker opens the one a server has.
  */
 export const ONE_PER_SERVER: TriggerKind[] = [
 	'seed_reward',
@@ -185,7 +191,8 @@ export const ONE_PER_SERVER: TriggerKind[] = [
 	'restart_skip',
 	'weather_cycle',
 	'infection',
-	'kill_race'
+	'kill_race',
+	'economic_war'
 ];
 
 /**
