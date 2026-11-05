@@ -2,8 +2,8 @@
 // event bus (the SSE route fans them to browsers; in the split roles every web process gets them
 // through the relay stream), and the team-kill rules get their turn. Their intents go through
 // the same outbox as every other trigger, so delivery, audit and the Discord mirror are shared.
-// The Kill rate, Kill distance, Name change, Bounty and Death whisper rules see every batch; the
-// rest of the work is for batches with team kills.
+// The Kill rate, Kill distance, Name change, Bounty, Infection, Kill race and Death whisper rules
+// see every batch; the rest of the work is for batches with team kills.
 import { and, eq, gte, inArray, isNull, lte, sql } from 'drizzle-orm';
 import { forLog } from './http';
 import type { Env } from './env';
@@ -13,6 +13,9 @@ import { killsOfMatch } from './matches';
 import {
 	bountyLapse,
 	enabledTriggers,
+	pushInfection,
+	pushRace,
+	type InfectionSay,
 	killDistanceAct,
 	renderTemplate,
 	statsFor,
@@ -79,16 +82,38 @@ import { notifyBounty, notifyTeamKills, type BountyCard } from './webhook-delive
 import {
 	BOUNTY_CLAIM,
 	BOUNTY_REWARD,
-	bountyState,
 	fromEarlierMatch,
 	bountyStep,
 	bountyTrack,
+	newMatch,
+	runWords,
+	trackState,
 	keepBounties,
 	rewardWords,
 	type BountyConfig,
 	type BountyKill,
 	type BountyPlayer
 } from './bounty';
+import {
+	infectionKills,
+	infectionSettingsKey,
+	syncRoundClock,
+	keepInfections,
+	knownInfection,
+	roundNews,
+	type InfectionConfig,
+	type InfectionPlayer
+} from './infection';
+import {
+	keepRaces,
+	killRaceSettingsKey,
+	raceMemory,
+	raceStep,
+	syncRaceClock,
+	tally,
+	type KillerLine,
+	type KillRaceConfig
+} from './kill-race';
 import { isDemoServer } from './env';
 import { drainMockFeed } from './mockgame';
 import { ingestBatch } from './feed';
@@ -134,6 +159,18 @@ export async function onKillsIngested(
 	} catch (err) {
 		if (!(err instanceof LostOwnership))
 			console.warn(`[warcon] bounty rules on ${serverId}:`, publicMessage(err));
+	}
+	try {
+		await actOnInfection(env, serverId, kills, vars);
+	} catch (err) {
+		if (!(err instanceof LostOwnership))
+			console.warn(`[warcon] infection rules on ${serverId}:`, publicMessage(err));
+	}
+	try {
+		await actOnKillRace(env, serverId, kills, vars);
+	} catch (err) {
+		if (!(err instanceof LostOwnership))
+			console.warn(`[warcon] kill race rules on ${serverId}:`, publicMessage(err));
 	}
 	try {
 		await actOnDeathWhisper(env, serverId, kills, vars);
@@ -622,7 +659,10 @@ async function actOnBounty(
 	for (const row of rows) {
 		const cfg = row.config as BountyConfig;
 		const { version, track } = bountyTrack(row);
-		const before = track.open;
+		const before = [...track.open];
+		const claimedBefore = new Set(track.claimed);
+		const winsBefore = new Map(track.wins);
+		const decidedBefore = track.decided;
 		const out: Evaluation = { intents: [], updates: [] };
 		const cards: BountyCard[] = [];
 		// The match this batch was stamped with, read only when a bounty is set or its player dies.
@@ -631,16 +671,17 @@ async function actOnBounty(
 			(stamped ??= matchKey(await stampedMatch(env, serverId, batch), Date.parse(batch[0].ts)));
 		// A bounty read back after a restart can be from a match that ended while no worker watched:
 		// the batch that could claim it says which match it is in, and an earlier match's lapses.
-		const open = track.open;
-		if (
-			open?.match.startsWith('m') &&
-			inOrder.some((k) => k.victim.steamId === open.steamId) &&
-			fromEarlierMatch(open.match, await batchMatch()) &&
-			track.open === open
-		) {
-			track.open = null;
-			track.runs.clear();
-			const lapse = bountyLapse(row, cfg, version, open, 'match', new Date(now), sorted[0].map);
+		for (const open of [...track.open]) {
+			if (
+				!open.match.startsWith('m') ||
+				!inOrder.some((k) => k.victim.steamId === open.steamId) ||
+				!fromEarlierMatch(open.match, await batchMatch()) ||
+				!track.open.includes(open)
+			)
+				continue;
+			track.open = track.open.filter((b) => b !== open);
+			newMatch(track);
+			const lapse = bountyLapse(row, cfg, open, 'match', new Date(now), sorted[0].map);
 			out.intents.push(lapse.intent);
 			out.updates.push(lapse.update);
 			cards.push(lapse.card);
@@ -652,23 +693,31 @@ async function actOnBounty(
 		const reward = rewardWords(cfg);
 		const slot = cfg.reward === 'slot';
 		const until = slot ? dateOf(new Date(now + cfg.slotDays * 86400_000)) : '';
-		const own = (target: string, streak: number, map: string) => ({
+		const goal = cfg.reward === 'win' ? (cfg.winClaims ?? 5) : '';
+		const own = (target: string, streak: number, map: string, claims: number | '' = '') => ({
 			target,
 			streak,
 			reward,
 			days: slot ? cfg.slotDays : '',
 			until,
+			goal,
+			claims,
 			...(map ? { map: mapName(map) } : {})
 		});
 		// said to the whole server, or to the claimer, so no org-wide stats (keptVars)
 		const stats = await vars.stats(
 			events.flatMap((e) =>
 				e.kind === 'set'
-					? [{ steamId: e.bounty.steamId, text: cfg.setMessage }]
-					: [
-							{ steamId: e.claimer.steamId, text: cfg.claimMessage },
-							{ steamId: e.claimer.steamId, text: cfg.whisper }
+					? [
+							{ steamId: e.bounty.steamId, text: cfg.setMessage },
+							{ steamId: e.bounty.steamId, text: cfg.markedWhisper ?? '' }
 						]
+					: e.kind === 'win'
+						? [{ steamId: e.claimer.steamId, text: cfg.winMessage ?? '' }]
+						: [
+								{ steamId: e.claimer.steamId, text: cfg.claimMessage },
+								{ steamId: e.claimer.steamId, text: cfg.whisper }
+							]
 			),
 			{ org: false }
 		);
@@ -678,6 +727,41 @@ async function actOnBounty(
 		for (const e of events) {
 			const k = byEvent.get(e.kill.eventId)!;
 			const dedupe = (what: string) => [row.id, what, k.eventId].join(':');
+			if (e.kind === 'win') {
+				// a side has claimed enough bounties: told, and the match ended (Match control)
+				const won = `${e.faction} won the bounty hunt with ${e.claims} bounties claimed.`;
+				const extra = { ...own('', 0, k.map, e.claims), winner: e.faction };
+				if (cfg.winMessage)
+					out.intents.push({
+						trigger: row,
+						action: 'broadcast',
+						params: { message: say(cfg.winMessage, e.claimer, extra, MAX_CHAT) },
+						target: e.faction,
+						okMessage: `Announced ${e.faction}'s bounty win.`,
+						detail: { winner: e.faction, claims: e.claims, stage: 'win', eventId: k.eventId },
+						steamId: null,
+						dedupeKey: dedupe('win')
+					});
+				out.intents.push({
+					trigger: row,
+					action: 'endMatch',
+					params: {},
+					target: 'match',
+					okMessage: `Ended the match: ${won.slice(0, -1)}.`,
+					detail: { winner: e.faction, claims: e.claims, stage: 'end', eventId: k.eventId },
+					steamId: null,
+					dedupeKey: dedupe('end')
+				});
+				out.updates.push({ id: row.id, lastFiredAt: new Date(now), lastResult: won.slice(0, -1) });
+				cards.push({
+					...card,
+					kind: 'win',
+					map: k.map || null,
+					winner: e.faction,
+					claims: e.claims
+				});
+				continue;
+			}
 			if (e.kind === 'set') {
 				const b = e.bounty;
 				const message = say(cfg.setMessage, b, own(b.name, b.streak, k.map), MAX_CHAT);
@@ -691,6 +775,21 @@ async function actOnBounty(
 					steamId: null,
 					dedupeKey: dedupe('set')
 				});
+				// the marked player is told it is them
+				if (cfg.markedWhisper)
+					out.intents.push({
+						trigger: row,
+						action: 'whisper',
+						params: {
+							steamId: b.steamId,
+							message: say(cfg.markedWhisper, b, own(b.name, b.streak, k.map), MAX_CHAT)
+						},
+						target: b.steamId,
+						okMessage: `Whispered ${b.name}: there is a bounty on them.`,
+						detail: { name: b.name, stage: 'marked', eventId: k.eventId },
+						steamId: b.steamId,
+						dedupeKey: dedupe('marked')
+					});
 				out.updates.push({
 					id: row.id,
 					lastFiredAt: new Date(now),
@@ -709,8 +808,8 @@ async function actOnBounty(
 			const b = e.bounty;
 			const c = e.claimer;
 			const claimer = c.name || c.steamId;
-			const claimed = `${claimer} claimed the bounty on ${b.name} (a run of ${b.best}).`;
-			const extra = own(b.name, b.best, k.map);
+			const claimed = `${claimer} claimed the bounty on ${b.name} (${runWords(b)}).`;
+			const extra = own(b.name, b.how === 'streak' ? b.best : b.streak, k.map, e.sideClaims);
 			out.intents.push({
 				trigger: row,
 				action: BOUNTY_CLAIM,
@@ -776,15 +875,16 @@ async function actOnBounty(
 				...card,
 				kind: 'claim',
 				map: k.map || null,
+				how: b.how,
 				claimer,
 				target: b.name,
 				run: b.best
 			});
 		}
-		// The open bounty as it stands after the batch, on the last update (they are applied in order).
-		const state = bountyState(version, track.open);
+		// The open bounties as they stand after the batch, on the last update (applied in order).
+		const state = trackState(version, track);
 		out.updates[out.updates.length - 1].state = state;
-		const after = track.open;
+		const after = JSON.stringify(state);
 		let queued = 0;
 		try {
 			await withOwnedTransaction(env, async (tx) => {
@@ -792,8 +892,13 @@ async function actOnBounty(
 				await applyTriggerUpdates(tx, out.updates);
 			});
 		} catch (err) {
-			// Not written: the bounty goes back to what it was, unless a look has moved it on since.
-			if (track.open === after) track.open = before;
+			// Not written: the bounties go back to what they were, unless a look has moved them on since.
+			if (JSON.stringify(trackState(version, track)) === after) {
+				track.open = before;
+				track.claimed = claimedBefore;
+				track.wins = winsBefore;
+				track.decided = decidedBefore;
+			}
 			throw err;
 		}
 		row.state = state;
@@ -1004,6 +1109,189 @@ async function actOnDeathWhisper(
 }
 
 /**
+ * The Infection rule's kills (infection.ts): a survivor killed by an infected player joins the
+ * infected, moved at once while they lie dead so they respawn on that side, told, and announced when
+ * the rule says. The round must be known (a look takes it first), and the rule waits while a Team
+ * balance rule is on. Roles move on as the kills are read, before anything is written: a batch that
+ * cannot be written leaves its players infected, and the next look moves anyone still on the wrong
+ * side.
+ */
+async function actOnInfection(
+	env: Env,
+	serverId: string,
+	batch: KillView[],
+	vars: KillerVars
+): Promise<void> {
+	const enabled = await enabledTriggers(env, serverId);
+	const rows = enabled.filter((r) => r.kind === 'infection');
+	keepInfections(serverId, new Set(rows.map((r) => r.id)));
+	if (!rows.length || enabled.some((r) => r.kind === 'two_teams')) return;
+	const m = memoryOf(serverId);
+	const players: InfectionPlayer[] = (m?.players ?? []).map((p) => ({
+		steamId: p.steamId,
+		name: p.name,
+		faction: p.faction
+	}));
+	const sorted = [...batch].sort((a, b) => a.eventTime - b.eventTime);
+	const now = Date.now();
+	for (const row of rows) {
+		const cfg = row.config as InfectionConfig;
+		const mem = knownInfection(row.id, infectionSettingsKey(cfg));
+		if (!mem) continue;
+		// a round taken over after a restart: the game's match clock says when it began
+		const latest = sorted[sorted.length - 1];
+		syncRoundClock(mem, Date.parse(latest.ts), latest.eventTime);
+		const { infected } = infectionKills(
+			cfg,
+			mem,
+			sorted.map((k) => ({
+				eventId: k.eventId,
+				killer: k.killer,
+				victim: k.victim,
+				suicide: k.suicide
+			})),
+			now
+		);
+		if (!infected.length) continue;
+		const news = roundNews(cfg, mem, players);
+		const stats = await vars.stats(
+			[
+				...infected.flatMap((i) => [
+					{ steamId: i.victim.steamId, text: cfg.infectWhisper },
+					{ steamId: i.victim.steamId, text: cfg.infectBroadcast }
+				]),
+				...news.flatMap((n) =>
+					n.kind === 'last' ? [{ steamId: n.survivor.steamId, text: cfg.lastSurvivorMessage }] : []
+				)
+			],
+			{ org: false }
+		);
+		const say: InfectionSay = (text, p, own) =>
+			renderTemplate(
+				text,
+				keptVars(
+					p
+						? vars.about({ steamId: p.steamId, name: p.name, faction: p.faction }, stats, own)
+						: vars.bare(own)
+				),
+				MAX_CHAT
+			);
+		const out: Evaluation = { intents: [], updates: [] };
+		pushInfection(out, row, cfg, mem, players, { infected, news }, say, now);
+		const last = infected[infected.length - 1];
+		out.updates.push({
+			id: row.id,
+			lastFiredAt: new Date(now),
+			lastResult: news.some((n) => n.kind === 'all')
+				? 'Round over: everyone is infected'
+				: `${last.victim.name || last.victim.steamId} infected by ${last.killer.name || last.killer.steamId}`
+		});
+		let queued = 0;
+		await withOwnedTransaction(env, async (tx) => {
+			queued = await enqueueIntents(tx, serverId, out.intents);
+			await applyTriggerUpdates(tx, out.updates);
+		});
+		if (queued) wakeDelivery();
+	}
+}
+
+/**
+ * Each killer's kills in a match, from what the feed stored for it: kills of the other side, of
+ * them headshots, and team kills. Suicides and the environment count for nobody. Read from the
+ * match's own rows (kills.match_row, stamped at receipt), within the match's time so the server's
+ * kill index is used.
+ */
+async function killerLines(
+	env: Env,
+	serverId: string,
+	matchRow: number,
+	causes: string[] = []
+): Promise<KillerLine[]> {
+	// the rule's weapons, matched in any case (the game's casing varies between tags)
+	const weapons = causes.length
+		? sql`AND lower(k.cause) IN (${sql.join(
+				causes.map((c) => sql`${c.toLowerCase()}`),
+				sql`, `
+			)})`
+		: sql``;
+	const rows = await env.db.execute<{
+		steamId: string;
+		name: string | null;
+		faction: string | null;
+		kills: number;
+		headshots: number;
+		teamKills: number;
+	}>(sql`
+		SELECT k.killer_steam_id AS "steamId", MAX(k.killer_name) AS name, k.killer_faction AS faction,
+		       COUNT(*) FILTER (WHERE NOT k.team_kill)::int AS kills,
+		       COUNT(*) FILTER (WHERE NOT k.team_kill AND k.headshot)::int AS headshots,
+		       COUNT(*) FILTER (WHERE k.team_kill)::int AS "teamKills"
+		  FROM kills k JOIN matches m ON m.id = ${matchRow} AND m.server_id = ${serverId}
+		 WHERE k.server_id = ${serverId} AND k.match_row = ${matchRow}
+		   AND k.ts >= m.started_at - interval '5 minutes'
+		   AND k.killer_steam_id IS NOT NULL AND NOT k.suicide ${weapons}
+		 GROUP BY k.killer_steam_id, k.killer_faction`);
+	return rows.map((r) => ({
+		steamId: r.steamId,
+		name: r.name ?? r.steamId,
+		faction: r.faction,
+		kills: Number(r.kills),
+		headshots: Number(r.headshots),
+		teamKills: Number(r.teamKills)
+	}));
+}
+
+/**
+ * The Kill race rule's count (kill-race.ts): after each batch, every side's kills in the match are
+ * read again, so a restart counts the same; the standings are announced as the leader passes each
+ * step, and a side that reaches the target wins and the match is ended. A batch with no match open
+ * (a server's first seconds) is passed over.
+ */
+async function actOnKillRace(
+	env: Env,
+	serverId: string,
+	batch: KillView[],
+	vars: KillerVars
+): Promise<void> {
+	const rows = (await enabledTriggers(env, serverId)).filter((r) => r.kind === 'kill_race');
+	keepRaces(serverId, new Set(rows.map((r) => r.id)));
+	if (!rows.length) return;
+	const matchRow = await stampedMatch(env, serverId, batch);
+	if (matchRow === null) return;
+	// read once per set of weapons: there is one rule per server, but each could name its own
+	const byWeapons = new Map<string, Promise<KillerLine[]>>();
+	const linesFor = (causes: string[] = []) => {
+		const k = causes.map((c) => c.toLowerCase()).join('|');
+		let got = byWeapons.get(k);
+		if (!got) byWeapons.set(k, (got = killerLines(env, serverId, matchRow, causes)));
+		return got;
+	};
+	const factions = (memoryOf(serverId)?.status?.scores ?? []).map((f) => f.name);
+	const latest = [...batch].sort((a, b) => a.eventTime - b.eventTime).at(-1)!;
+	const now = Date.now();
+	const match = `m${matchRow}`;
+	for (const row of rows) {
+		const cfg = row.config as KillRaceConfig;
+		const { mem, fresh } = raceMemory(serverId, row.id, killRaceSettingsKey(cfg), match, now, true);
+		// the game's match clock says when the match began
+		syncRaceClock(mem, Date.parse(latest.ts), latest.eventTime);
+		const lines = await linesFor(cfg.causes);
+		const news = raceStep(cfg, mem, tally(cfg, lines, factions), fresh);
+		if (!news.length) continue;
+		const out: Evaluation = { intents: [], updates: [] };
+		pushRace(out, row, cfg, mem.match, news, (text, own) =>
+			renderTemplate(text, keptVars(vars.bare(own)), MAX_CHAT)
+		);
+		let queued = 0;
+		await withOwnedTransaction(env, async (tx) => {
+			queued = await enqueueIntents(tx, serverId, out.intents);
+			await applyTriggerUpdates(tx, out.updates);
+		});
+		if (queued) wakeDelivery();
+	}
+}
+
+/**
  * The placeholders of a message about a kill's killer (or either of its players): the server as the
  * worker last saw it, the player (their side as the kill has it, their ping from the last player
  * list) and their stats, read once per player for the whole batch, whichever rules ask. Nothing is
@@ -1033,7 +1321,9 @@ function killerVars(env: Env, serverId: string) {
 		of: (k: KillView, stats: StatsRead, own: MessageVars): MessageVars =>
 			about(k.killer!, stats, own),
 		/** the same for either player of a kill, as the feed named them */
-		about
+		about,
+		/** the server's placeholders and a rule's own, about no player */
+		bare: (own: MessageVars): MessageVars => messageVars(look().server, null, {}, own)
 	};
 	function about(
 		who: { steamId: string; name: string; faction: string | null },

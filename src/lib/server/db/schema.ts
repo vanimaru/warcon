@@ -941,7 +941,10 @@ export const triggers = pgTable(
 				'live_name',
 				'restart_skip',
 				'weather_cycle',
-				'death_whisper'
+				'death_whisper',
+				'infection',
+				'kill_race',
+				'economic_war'
 			]
 		}).notNull(),
 		name: text('name').notNull(),

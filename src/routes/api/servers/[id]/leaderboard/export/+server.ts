@@ -10,6 +10,7 @@ import { exportBoard } from '$lib/server/leaderboards';
 import { boardWindow } from '$lib/server/seasons';
 import { csvCell, fileSlug } from '$lib/server/csv';
 import {
+	headshotRate,
 	kdRatio,
 	parseBoardQuery,
 	perHour,
@@ -34,6 +35,7 @@ const COLUMNS: [string, (r: BoardRow) => unknown][] = [
 	['kd', (r) => round(kdRatio(r.kills, r.deaths), 2)],
 	['kills_per_hour', (r) => round(perHour(r.kills, r.minutes, r.seedMinutes), 1)],
 	['headshots', (r) => r.headshots],
+	['headshot_pct', (r) => percent(headshotRate(r.headshots, r.kills))],
 	['team_kills', (r) => r.teamKills],
 	['suicides', (r) => r.suicides],
 	['vehicle_kills', (r) => r.vehicleKills],

@@ -5,13 +5,18 @@
 	import { MAX_CHAT } from '$lib/chat';
 	import { fmtAgo, fmtSpan, fmtTime, lightingLabel, mapLabel } from '$lib/format';
 	import { can } from '$lib/capabilities';
+	import { INFECTION_DEFAULTS } from '$lib/infection-defaults';
+	import { KILL_RACE_DEFAULTS } from '$lib/kill-race-defaults';
+	import { ECONOMIC_WAR_DEFAULTS } from '$lib/economic-war-defaults';
+	import { fmtCash } from '$lib/cash';
 	import {
 		causeKind,
 		causeLabel,
 		knownCauses,
 		notCountedLabel,
 		TEAM_KILL_NOT_COUNTED,
-		VEHICLE_CRASH
+		VEHICLE_CRASH,
+		WEAPON_CLASSES
 	} from '$lib/causes';
 	import { placeholdersFor, unfilled, type PlaceholderGroupKey } from '$lib/placeholders';
 	import { isSteamId } from '$lib/steam-profiles';
@@ -33,11 +38,15 @@
 		DryRunResult,
 		MapSelection,
 		OutboxView,
+		Player,
 		Status,
 		TriggerKind,
 		TriggerView
 	} from '$lib/types';
 	import type { PageProps } from './$types';
+
+	/** who a Bounty rule marks: a run, each side's top killers, or the players it names */
+	type BountyPickForm = 'streak' | 'top' | 'manual';
 
 	let { data }: PageProps = $props();
 	let id = $derived(data.server.id);
@@ -149,6 +158,8 @@
 	let deliveriesTimer: ReturnType<typeof setTimeout> | undefined;
 	/** what the server shows now, for a Live server name rule's preview */
 	let liveStatus = $state<Status | null>(null);
+	/** who is on now, for a Bounty rule's named players */
+	let livePlayers = $state<Player[]>([]);
 	async function refreshDeliveries() {
 		if (untrack(() => ruleIds.length)) void refreshRuleRows();
 		try {
@@ -167,6 +178,7 @@
 			(v) => {
 				const was = liveStatus?.serverName;
 				liveStatus = v.status;
+				livePlayers = v.players;
 				// a Live server name rule's row says what it last wrote: re-read it when the name moves
 				if (
 					was !== undefined &&
@@ -249,9 +261,11 @@
 			case 'bounty':
 				return !data.feed
 					? 'Needs the kill feed, which is off on this server. Turn it on under Config.'
-					: !canChat
-						? 'Saving needs the Chat capability as well as Automation: the bounty is announced to the server.'
-						: '';
+					: form?.kind === 'bounty' && form.bountyReward === 'win' && !canMatch
+						? 'Saving needs the Match control capability as well as Automation: the rule ends the match for the side that wins.'
+						: !canChat
+							? 'Saving needs the Chat capability as well as Automation: the bounty is announced to the server.'
+							: '';
 			case 'death_whisper':
 				return !data.feed
 					? 'Needs the kill feed, which is off on this server. Turn it on under Config.'
@@ -267,6 +281,22 @@
 				return canMatch
 					? ''
 					: 'Saving needs the Match control capability as well as Automation: the rule changes the weather.';
+			case 'kill_race':
+				return !data.feed
+					? 'Needs the kill feed, which is off on this server. Turn it on under Config.'
+					: !canMatch
+						? 'Saving needs the Match control capability as well as Automation: the rule ends the match.'
+						: '';
+			case 'economic_war':
+				return canMatch
+					? ''
+					: 'Saving needs the Match control capability as well as Automation: the rule ends the match.';
+			case 'infection':
+				return !data.feed
+					? 'Needs the kill feed, which is off on this server. Turn it on under Config.'
+					: !canMove
+						? 'Saving needs the Move capability as well as Automation: the rule moves players between teams.'
+						: '';
 			case 'rotation_shuffle':
 				return canConfig
 					? ''
@@ -291,6 +321,8 @@
 	 */
 	let canKick = $derived(can(data.server.caps, 'players.kick'));
 	let canChat = $derived(can(data.server.caps, 'chat.send'));
+	/** an Infection rule moves players between teams */
+	let canMove = $derived(can(data.server.caps, 'players.move'));
 	let canKill = $derived(can(data.server.caps, 'players.kill'));
 	let canBanHere = $derived(can(data.server.caps, 'bans.manage'));
 	/** a Rotation shuffle rule rewrites the rotation in the config document */
@@ -328,6 +360,22 @@
 		const kind = causeKind(cause);
 		return kind === 'vehicle weapon' || kind === 'vehicle' ? kind : 'weapon';
 	};
+	/** A Kill race's weapons: every listed tag of a kind, placed charges too (the race counts them). */
+	const raceWeaponChoices = (chosen: string[]) =>
+		WEAPON_LISTS.map(([kind, title]) => ({
+			kind,
+			title,
+			choices: causeChoices(
+				(c) => causeKind(c) === kind,
+				chosen.filter((c) => listOf(c) === kind)
+			)
+		}));
+	/** Whether every tag of a class is in the list, and the list with the class added or taken out. */
+	const hasClass = (list: string[], tags: readonly string[]) => tags.every((t) => holds(list, t));
+	const withClass = (list: string[], tags: readonly string[], on: boolean) =>
+		on
+			? [...list, ...tags.filter((t) => !holds(list, t))]
+			: list.filter((c) => !tags.some((t) => t.toLowerCase() === c.toLowerCase()));
 	const weaponChoices = (chosen: string[]) =>
 		WEAPON_LISTS.map(([kind, title]) => ({
 			kind,
@@ -376,38 +424,84 @@
 				  kind === 'kill_rate' ||
 				  kind === 'kill_distance' ||
 				  kind === 'name_change' ||
-				  ((kind === 'bounty' || kind === 'death_whisper') && !data.feed)
+				  ((kind === 'bounty' ||
+					  kind === 'infection' ||
+					  kind === 'kill_race' ||
+					  kind === 'death_whisper') &&
+					  !data.feed)
 				? 'Needs the kill feed'
-				: kind === 'bounty' || kind === 'death_whisper'
-					? 'Needs Chat'
-					: kind === 'risk_kick'
-						? 'Needs a Steam key'
-						: kind === 'seed_reward'
-							? 'Needs Reserved slots'
-							: kind === 'rotation_shuffle' || kind === 'live_name'
-								? 'Needs Config & settings'
-								: kind === 'empty_reset' || kind === 'restart_skip' || kind === 'weather_cycle'
-									? 'Needs Match control'
-									: '';
-	/** A Bounty rule's texts until they are written: a slot is named, an announcement-only rule asks. */
-	const bountyTexts = (reward: 'slot' | 'none') =>
-		reward === 'slot'
-			? {
-					setMessage: 'BOUNTY on {name}: {streak} kills without dying. Kill them for {reward}.',
-					claimMessage: "{name} ended {target}'s run of {streak} and takes {reward}.",
-					whisper: 'Bounty claimed. Your reserved slot lasts until {until}.'
-				}
-			: {
-					setMessage: 'BOUNTY on {name}: {streak} kills without dying. Who ends the run?',
-					claimMessage: "{name} ended {target}'s run of {streak}.",
-					whisper: ''
-				};
-	/** Switching the reward swaps the texts still as the rule began them. */
-	const swapBounty = (f: Form) => {
-		const from = bountyTexts(f.bountyReward === 'slot' ? 'none' : 'slot');
-		const to = bountyTexts(f.bountyReward);
+				: kind === 'infection'
+					? 'Needs Move'
+					: kind === 'bounty' || kind === 'death_whisper'
+						? 'Needs Chat'
+						: kind === 'risk_kick'
+							? 'Needs a Steam key'
+							: kind === 'seed_reward'
+								? 'Needs Reserved slots'
+								: kind === 'rotation_shuffle' || kind === 'live_name'
+									? 'Needs Config & settings'
+									: kind === 'empty_reset' ||
+										  kind === 'restart_skip' ||
+										  kind === 'weather_cycle' ||
+										  kind === 'kill_race' ||
+										  kind === 'economic_war'
+										? 'Needs Match control'
+										: '';
+	/**
+	 * A Bounty rule's texts until they are written, by who it marks and its reward: a slot is named,
+	 * an announcement-only rule asks.
+	 */
+	const bountyTexts = (reward: Form['bountyReward'], pick: BountyPickForm = 'streak') => {
+		const slot = reward === 'slot';
+		const win = reward === 'win';
+		const set =
+			pick === 'top'
+				? '{name} of {faction}: {streak} kills, the most on their side.'
+				: pick === 'manual'
+					? '{name} of {faction}.'
+					: '{name} of {faction}: {streak} kills without dying.';
+		const ask = pick === 'streak' ? 'Who ends the run?' : 'Who takes them down?';
+		const claim =
+			pick === 'streak' ? "{name} ended {target}'s run of {streak}" : '{name} took down {target}';
+		return {
+			setMessage: `BOUNTY on ${set} ${
+				slot
+					? 'Kill them for {reward}.'
+					: win
+						? 'First side to {goal} bounties wins the match!'
+						: ask
+			}`,
+			claimMessage: slot
+				? `${claim} and takes {reward}.`
+				: win
+					? `${claim}: {claims} of {goal} for {faction}.`
+					: `${claim}.`,
+			whisper: slot ? 'Bounty claimed. Your reserved slot lasts until {until}.' : ''
+		};
+	};
+	/** Switching the reward or the pick swaps the texts still as the rule began them. */
+	const swapBounty = (f: Form, was: { reward?: Form['bountyReward']; pick?: BountyPickForm }) => {
+		const from = bountyTexts(was.reward ?? f.bountyReward, was.pick ?? f.bountyPick);
+		const to = bountyTexts(f.bountyReward, f.bountyPick);
 		for (const k of ['setMessage', 'claimMessage', 'whisper'] as const)
 			if (f[k] === from[k]) f[k] = to[k];
+	};
+	/** A Bounty rule's reward switched, its texts still as the rule began them swapped with it. */
+	const rewardTo = (f: Form, reward: Form['bountyReward']) => {
+		const was = f.bountyReward;
+		f.bountyReward = reward;
+		swapBounty(f, { reward: was });
+	};
+	/** A Bounty rule's named player added from who is on, or by SteamID64. */
+	const addWanted = (f: Form, steamId: string, name = '') => {
+		const id = steamId.trim();
+		if (!/^\d{17}$/.test(id)) {
+			toast('Give a SteamID64: 17 digits.', 'err');
+			return;
+		}
+		if (f.wanted.some((w) => w.steamId === id)) return;
+		const on = livePlayers.find((p) => p.steamId === id);
+		f.wanted = [...f.wanted, { steamId: id, name: name || on?.name || id }];
 	};
 	/** The Add rule picker is open; `fromPicker`: the editor came from it, so it offers the way back. */
 	let picking = $state(false);
@@ -573,8 +667,19 @@
 		stopAt: number;
 		doneMessage: string;
 		streak: number;
-		bountyReward: 'slot' | 'none';
+		bountyReward: 'slot' | 'none' | 'win';
+		/** a Bounty rule's claims for a side to win the match (reward 'win'), and what it announces */
+		winClaims: number;
+		bountyWinMessage: string;
+		/** a Bounty rule's pick, its bounties on each side at once, the top's kills, the named */
+		bountyPick: BountyPickForm;
+		perFaction: number;
+		minKills: number;
+		wanted: { steamId: string; name: string }[];
+		wantedInput: string;
 		setMessage: string;
+		/** a Bounty rule's whisper to the player it marks */
+		markedWhisper: string;
 		claimMessage: string;
 		whisper: string;
 		/** a Rotation shuffle rule's map ids, in the order they take turns */
@@ -587,7 +692,85 @@
 		lightOrder: string[];
 		lightOn: string[];
 		random: boolean;
+		/** a Weather cycle rule's chance on the clock, its scores and minutes into a match, and
+		 *  theirs */
+		everyChance: number;
+		scoreSteps: string;
+		scoreChance: number;
+		matchMinutes: string;
+		minutesChance: number;
+		/** an Infection rule's sides, first infected, texts and end */
+		infectedFaction: string;
+		survivorFaction: string;
+		startInfected: number;
+		perPlayers: number;
+		/** survivor counts to announce, comma-separated */
+		milestones: string;
+		patientWhisper: string;
+		/** an Infection rule moves the round's first infected with a kill, so they respawn */
+		respawnPatients: boolean;
+		infectWhisper: string;
+		infectBroadcast: string;
+		fewLeftMessage: string;
+		lastSurvivorMessage: string;
+		allInfectedMessage: string;
+		survivorsWinMessage: string;
+		infectedWinMessage: string;
+		endMatch: boolean;
+		/** an Infection rule switches the game's team lock off while it is on, and back after */
+		unlockTeams: boolean;
+		/** an Infection rule's time limit (0: none), the minutes left it announces, and the text */
+		timeLimitMinutes: number;
+		timeWarnings: string;
+		timeLeftMessage: string;
+		/** a Kill race rule's kills to win, what counts, how often the standings are told, and texts */
+		raceTarget: number;
+		headshotsOnly: boolean;
+		teamKillsSubtract: boolean;
+		announceEvery: number;
+		progressMessage: string;
+		winMessage: string;
+		drawMessage: string;
+		/** an Economic War rule's cash to win (its steps, limit and texts are the Kill race's fields),
+		 *  and the seconds a match's start and a late joiner's first moments on a side do not count */
+		econTarget: number;
+		/** an Economic War rule's percentages of the target announced, and their text; money spent
+		 *  taken off */
+		milestoneMessage: string;
+		spendingCounts: boolean;
+		matchGraceSeconds: number;
+		joinGraceSeconds: number;
 	}
+	/** An Infection rule's texts, in the order a round goes, with what each is for. */
+	const INFECTION_TEXTS = [
+		['startMessage', 'When a round starts'],
+		['patientWhisper', "Whisper to each of the round's first infected"],
+		['infectWhisper', 'Whisper to the newly infected'],
+		['infectBroadcast', 'Broadcast at every infection'],
+		['fewLeftMessage', 'As the survivors fall to each count below'],
+		['timeLeftMessage', 'As the time left falls to each warning below'],
+		['lastSurvivorMessage', 'When one survivor is left'],
+		['allInfectedMessage', 'When everyone is infected'],
+		['survivorsWinMessage', 'As the match ends with a survivors’ side ahead'],
+		['infectedWinMessage', 'As the match ends with the infected ahead']
+	] as const;
+	/** A Kill race rule's texts, in the order a match goes, with what each is for. */
+	const RACE_TEXTS = [
+		['startMessage', 'As a match starts'],
+		['progressMessage', 'Each time the leader passes a step'],
+		['timeLeftMessage', 'As the time left falls to each warning'],
+		['winMessage', 'When a side wins'],
+		['drawMessage', 'When the time runs out on a tie']
+	] as const;
+	/** An Economic War rule's texts, in the order a match goes, with what each is for. */
+	const ECON_TEXTS = [
+		['startMessage', 'As a match starts'],
+		['milestoneMessage', 'As the leader reaches each percentage of the target'],
+		['progressMessage', 'Each time the leader passes a step'],
+		['timeLeftMessage', 'As the time left falls to each warning'],
+		['winMessage', 'When a side wins'],
+		['drawMessage', 'When the time runs out on a tie']
+	] as const;
 	/** WARDOGS' factions, offered for Team balance; a name the game adds later can still be typed. */
 	const FACTIONS = ['Lonestar', 'Valkyra', 'Manticore'];
 	/** The alphabets a Latin policy can let in, by the name the rule stores and the one people use. */
@@ -694,6 +877,8 @@
 		const s = (k: string, d: string) => (typeof c[k] === 'string' ? (c[k] as string) : d);
 		const n = (k: string, d: number) => (typeof c[k] === 'number' ? (c[k] as number) : d);
 		const b = (k: string, d: boolean) => (typeof c[k] === 'boolean' ? (c[k] as boolean) : d);
+		// a Kill race and an Economic War share the fields of their texts, each with its own defaults
+		const raceTexts = kind === 'economic_war' ? ECONOMIC_WAR_DEFAULTS : KILL_RACE_DEFAULTS;
 		// a new Kill distance rule kicks, or bans for an author who may ban but not kick, or warns for
 		// one who may only whisper
 		const distanceAction: Form['distanceAction'] =
@@ -712,7 +897,12 @@
 							: 'kick';
 		// a new Bounty rule gives a slot when its author may reserve one, and announces only otherwise
 		const bountyReward: Form['bountyReward'] =
-			c.reward === 'none' || (!t && !canSlotHere && !canSlotOrg) ? 'none' : 'slot';
+			c.reward === 'win'
+				? 'win'
+				: c.reward === 'none' || (!t && !canSlotHere && !canSlotOrg)
+					? 'none'
+					: 'slot';
+		const bountyPick: BountyPickForm = c.pick === 'top' || c.pick === 'manual' ? c.pick : 'streak';
 		form = {
 			id: copy ? null : (t?.id ?? null),
 			kind,
@@ -743,7 +933,10 @@
 				'everyMinutes',
 				kind === 'afk_protection' ? 3 : kind === 'weather_cycle' ? 30 : 15
 			),
-			minPlayers: n('minPlayers', kind === 'bounty' || kind === 'afk_watch' ? 20 : 1),
+			minPlayers: n(
+				'minPlayers',
+				kind === 'bounty' || kind === 'afk_watch' ? 20 : kind === 'infection' ? 6 : 1
+			),
 			maxPlayers: typeof c.maxPlayers === 'number' ? c.maxPlayers : null,
 			afterMinutes: n('afterMinutes', 20),
 			cooldownMinutes: n('cooldownMinutes', 30),
@@ -784,7 +977,16 @@
 			),
 			repeatMinutes: n('repeatMinutes', 0),
 			endMessage: s('endMessage', 'Match over: {faction} wins on {previous} · {scores}'),
-			startMessage: s('startMessage', 'New match on {map}. Good luck!'),
+			startMessage: s(
+				'startMessage',
+				kind === 'infection'
+					? INFECTION_DEFAULTS.startMessage
+					: kind === 'kill_race'
+						? KILL_RACE_DEFAULTS.startMessage
+						: kind === 'economic_war'
+							? ECONOMIC_WAR_DEFAULTS.startMessage
+							: 'New match on {map}. Good luck!'
+			),
 			warnAt: n('warnAt', 2),
 			warnMessage: s(
 				'warnMessage',
@@ -838,7 +1040,9 @@
 			watchOnly: b('watchOnly', false),
 			causes: Array.isArray(c.causes)
 				? [...(c.causes as string[])]
-				: ['Id.Item.Defibrillator.Standard'],
+				: kind === 'kill_race'
+					? []
+					: ['Id.Item.Defibrillator.Standard'],
 			minDistanceM: n('minDistanceM', 100),
 			count: n('count', 2),
 			distanceAction,
@@ -849,9 +1053,26 @@
 			doneMessage: s('doneMessage', 'Thanks for seeding {server}! The match is live.'),
 			streak: n('streak', 15),
 			bountyReward,
-			setMessage: s('setMessage', bountyTexts(bountyReward).setMessage),
-			claimMessage: s('claimMessage', bountyTexts(bountyReward).claimMessage),
-			whisper: s('whisper', bountyTexts(bountyReward).whisper),
+			bountyPick,
+			winClaims: n('winClaims', 5),
+			bountyWinMessage: s(
+				'winMessage',
+				'{winner} wins the bounty hunt with {claims} bounties claimed!'
+			),
+			perFaction: n('perFaction', 1),
+			minKills: n('minKills', 5),
+			wanted: Array.isArray(c.wanted)
+				? (c.wanted as { steamId: string; name: string }[]).map((w) => ({ ...w }))
+				: [],
+			wantedInput: '',
+			setMessage: s('setMessage', bountyTexts(bountyReward, bountyPick).setMessage),
+			claimMessage: s('claimMessage', bountyTexts(bountyReward, bountyPick).claimMessage),
+			whisper: s('whisper', bountyTexts(bountyReward, bountyPick).whisper),
+			// a new rule tells the player it marks; one saved before the whisper existed stays silent
+			markedWhisper: s(
+				'markedWhisper',
+				t ? '' : 'You have a bounty on you: every enemy is hunting you. Stay alive!'
+			),
 			mapOrder: mapTurn(c.maps),
 			// a new rule starts from the name the server shows now
 			liveBase: s('base', liveStatus?.serverName ?? ''),
@@ -861,7 +1082,60 @@
 				data.catalog.lightings.map((l) => l.id)
 			),
 			lightOn: Array.isArray(c.lightings) ? [...(c.lightings as string[])] : weatherPicks(),
-			random: b('random', false)
+			random: b('random', false),
+			everyChance: n('everyChance', 100),
+			scoreSteps: Array.isArray(c.scoreSteps) ? (c.scoreSteps as number[]).join(', ') : '',
+			scoreChance: n('scoreChance', 50),
+			matchMinutes: Array.isArray(c.matchMinutes) ? (c.matchMinutes as number[]).join(', ') : '',
+			minutesChance: n('minutesChance', 50),
+			infectedFaction: s('infectedFaction', 'Manticore'),
+			// a new rule's survivors keep the side they picked, on either other faction
+			survivorFaction: s('survivorFaction', ''),
+			startInfected: n('startInfected', 1),
+			perPlayers: n('perPlayers', 10),
+			milestones: Array.isArray(c.milestones)
+				? (c.milestones as number[]).join(', ')
+				: kind === 'economic_war'
+					? '25, 50, 75, 90, 95'
+					: '25, 10, 5',
+			patientWhisper: s('patientWhisper', INFECTION_DEFAULTS.patientWhisper),
+			// a new rule respawns its first infected on their new side
+			respawnPatients: b('respawnPatients', !t && kind === 'infection'),
+			infectWhisper: s('infectWhisper', INFECTION_DEFAULTS.infectWhisper),
+			infectBroadcast: s('infectBroadcast', INFECTION_DEFAULTS.infectBroadcast),
+			fewLeftMessage: s('fewLeftMessage', INFECTION_DEFAULTS.fewLeftMessage),
+			lastSurvivorMessage: s('lastSurvivorMessage', INFECTION_DEFAULTS.lastSurvivorMessage),
+			allInfectedMessage: s('allInfectedMessage', INFECTION_DEFAULTS.allInfectedMessage),
+			survivorsWinMessage: s('survivorsWinMessage', INFECTION_DEFAULTS.survivorsWinMessage),
+			infectedWinMessage: s('infectedWinMessage', INFECTION_DEFAULTS.infectedWinMessage),
+			endMatch: b('endMatch', false),
+			// a new rule switches the team lock off when its maker may write the config document
+			unlockTeams: b('unlockTeams', !t && kind === 'infection' && canConfig),
+			// a new rule plays to a 20-minute limit; an older one keeps none until it is given one
+			timeLimitMinutes: n('timeLimitMinutes', t || kind !== 'infection' ? 0 : 20),
+			timeWarnings: Array.isArray(c.timeWarnings)
+				? (c.timeWarnings as number[]).join(', ')
+				: '5, 1',
+			timeLeftMessage: s(
+				'timeLeftMessage',
+				kind === 'kill_race'
+					? KILL_RACE_DEFAULTS.timeLeftMessage
+					: kind === 'economic_war'
+						? ECONOMIC_WAR_DEFAULTS.timeLeftMessage
+						: INFECTION_DEFAULTS.timeLeftMessage
+			),
+			raceTarget: n('target', 100),
+			headshotsOnly: b('headshotsOnly', false),
+			teamKillsSubtract: b('teamKillsSubtract', false),
+			announceEvery: n('announceEvery', kind === 'economic_war' ? 0 : 25),
+			progressMessage: s('progressMessage', raceTexts.progressMessage),
+			milestoneMessage: s('milestoneMessage', ECONOMIC_WAR_DEFAULTS.milestoneMessage),
+			spendingCounts: b('spendingCounts', false),
+			winMessage: s('winMessage', raceTexts.winMessage),
+			drawMessage: s('drawMessage', raceTexts.drawMessage),
+			econTarget: n('target', 30000),
+			matchGraceSeconds: n('matchGraceSeconds', 30),
+			joinGraceSeconds: n('joinGraceSeconds', 30)
 		};
 		dry = null;
 		pendingSel =
@@ -1055,14 +1329,21 @@
 				};
 			case 'bounty':
 				return {
+					pick: f.bountyPick,
+					perFaction: Number(f.perFaction),
+					minKills: Number(f.minKills),
+					wanted: f.wanted,
 					streak: Number(f.streak),
 					minPlayers: Number(f.minPlayers),
 					reward: f.bountyReward,
+					winClaims: Number(f.winClaims),
+					winMessage: f.bountyWinMessage,
 					slotDays: Number(f.slotDays),
 					scope: f.slotScope,
 					setMessage: f.setMessage,
 					claimMessage: f.claimMessage,
-					whisper: f.whisper
+					whisper: f.whisper,
+					markedWhisper: f.markedWhisper
 				};
 			case 'rotation_shuffle':
 				return { maps: f.mapOrder };
@@ -1070,10 +1351,92 @@
 				return { base: f.liveBase, append: f.liveAppend };
 			case 'restart_skip':
 				return {};
+			case 'kill_race':
+				return {
+					target: Number(f.raceTarget),
+					headshotsOnly: f.headshotsOnly,
+					causes: f.causes,
+					teamKillsSubtract: f.teamKillsSubtract,
+					announceEvery: Number(f.announceEvery) || 0,
+					timeLimitMinutes: Number(f.timeLimitMinutes) || 0,
+					timeWarnings: f.timeWarnings
+						.split(/[\s,]+/)
+						.filter(Boolean)
+						.map(Number),
+					startMessage: f.startMessage,
+					progressMessage: f.progressMessage,
+					winMessage: f.winMessage,
+					drawMessage: f.drawMessage,
+					timeLeftMessage: f.timeLeftMessage
+				};
+			case 'economic_war':
+				return {
+					target: Number(f.econTarget),
+					spendingCounts: f.spendingCounts,
+					milestones: f.milestones
+						.split(/[\s,]+/)
+						.filter(Boolean)
+						.map(Number),
+					milestoneMessage: f.milestoneMessage,
+					matchGraceSeconds: Number(f.matchGraceSeconds) || 0,
+					joinGraceSeconds: Number(f.joinGraceSeconds) || 0,
+					announceEvery: Number(f.announceEvery) || 0,
+					timeLimitMinutes: Number(f.timeLimitMinutes) || 0,
+					timeWarnings: f.timeWarnings
+						.split(/[\s,]+/)
+						.filter(Boolean)
+						.map(Number),
+					startMessage: f.startMessage,
+					progressMessage: f.progressMessage,
+					winMessage: f.winMessage,
+					drawMessage: f.drawMessage,
+					timeLeftMessage: f.timeLeftMessage
+				};
+			case 'infection':
+				return {
+					infectedFaction: f.infectedFaction.trim(),
+					survivorFaction: f.survivorFaction.trim(),
+					startInfected: Number(f.startInfected),
+					perPlayers: Number(f.perPlayers) || 0,
+					milestones: f.milestones
+						.split(/[\s,]+/)
+						.filter(Boolean)
+						.map(Number),
+					minPlayers: Number(f.minPlayers),
+					startMessage: f.startMessage,
+					patientWhisper: f.patientWhisper,
+					respawnPatients: f.respawnPatients,
+					infectWhisper: f.infectWhisper,
+					infectBroadcast: f.infectBroadcast,
+					fewLeftMessage: f.fewLeftMessage,
+					lastSurvivorMessage: f.lastSurvivorMessage,
+					allInfectedMessage: f.allInfectedMessage,
+					survivorsWinMessage: f.survivorsWinMessage,
+					infectedWinMessage: f.infectedWinMessage,
+					endMatch: f.endMatch,
+					timeLimitMinutes: Number(f.timeLimitMinutes) || 0,
+					timeWarnings: f.timeWarnings
+						.split(/[\s,]+/)
+						.filter(Boolean)
+						.map(Number),
+					timeLeftMessage: f.timeLeftMessage,
+					unlockTeams: f.unlockTeams
+				};
 			case 'weather_cycle':
 				return {
 					lightings: f.lightOrder.filter((l) => f.lightOn.includes(l)),
-					everyMinutes: Number(f.everyMinutes),
+					everyMinutes: Number(f.everyMinutes) || 0,
+					everyChance: Number(f.everyChance),
+					scoreSteps: f.scoreSteps
+						.split(/[\s,]+/)
+						.filter(Boolean)
+						.map(Number),
+					scoreChance: Number(f.scoreChance),
+					matchMinutes: f.matchMinutes
+						.split(/[\s,]+/)
+						.filter(Boolean)
+						.map(Number),
+					minutesChance: Number(f.minutesChance),
 					random: f.random,
 					minPlayers: Number(f.minPlayers)
 				};
@@ -1319,15 +1682,70 @@
 					.filter(Boolean)
 					.join(' · ');
 			}
+			case 'kill_race':
+				return [
+					`first side to ${c.target} ${c.headshotsOnly ? 'headshot kills' : 'kills'} wins`,
+					Array.isArray(c.causes) && c.causes.length
+						? `${c.causes.length} weapon${c.causes.length === 1 ? '' : 's'} only`
+						: '',
+					c.teamKillsSubtract ? 'team kills count against' : '',
+					Number(c.announceEvery) > 0 ? `standings every ${c.announceEvery}` : '',
+					Number(c.timeLimitMinutes) > 0 ? `${c.timeLimitMinutes} min limit` : ''
+				]
+					.filter(Boolean)
+					.join(' · ');
+			case 'economic_war':
+				return [
+					`first side to earn ${fmtCash(Number(c.target))} wins`,
+					c.spendingCounts ? 'spending counts against' : '',
+					Array.isArray(c.milestones) && c.milestones.length
+						? `told at ${(c.milestones as number[]).join(', ')}%`
+						: '',
+					`starting cash ${c.matchGraceSeconds ?? 30}s / joiners ${c.joinGraceSeconds ?? 30}s`,
+					Number(c.announceEvery) > 0 ? `standings every ${fmtCash(Number(c.announceEvery))}` : '',
+					Number(c.timeLimitMinutes) > 0 ? `${c.timeLimitMinutes} min limit` : ''
+				]
+					.filter(Boolean)
+					.join(' · ');
+			case 'infection': {
+				const n = Number(c.startInfected) || 1;
+				const per = Number(c.perPlayers) || 0;
+				return [
+					c.survivorFaction
+						? `two sides: ${c.infectedFaction} infect ${c.survivorFaction}`
+						: `${c.infectedFaction} infect every other faction`,
+					`${per ? `1 in ${per} (at least ${n})` : n} infected at the start, with ${c.minPlayers}+ on`,
+					Number(c.timeLimitMinutes) > 0
+						? `${c.timeLimitMinutes} min limit, survivors win when it runs out`
+						: '',
+					c.endMatch ? 'ends the match once all are infected' : '',
+					c.unlockTeams ? 'team lock off while on' : ''
+				]
+					.filter(Boolean)
+					.join(' · ');
+			}
 			case 'afk_protection':
 				return `kill everyone every ${c.everyMinutes} min while fewer than ${c.stopAt} are on and no side has scored · then off until the server empties or restarts${c.message ? ' · with a broadcast' : ''}${c.doneMessage ? ' · thanks at the start' : ''}`;
 			case 'bounty': {
 				const days = Number(c.slotDays);
+				const per = Number(c.perFaction) || 1;
+				const wanted = Array.isArray(c.wanted) ? (c.wanted as { name: string }[]) : [];
 				return [
-					`${c.streak} kills without dying, with ${c.minPlayers}+ on`,
+					c.pick === 'top'
+						? `each side's top ${per === 1 ? 'killer' : `${per} killers`} with ${c.minKills}+ kills, with ${c.minPlayers}+ on`
+						: c.pick === 'manual'
+							? `${wanted.length} named (${wanted
+									.slice(0, 3)
+									.map((w) => w.name)
+									.join(
+										', '
+									)}${wanted.length > 3 ? ', …' : ''}), up to ${per} a side, with ${c.minPlayers}+ on`
+							: `${c.streak} kills without dying, with ${c.minPlayers}+ on`,
 					c.reward === 'none'
 						? 'announced only'
-						: `reserved slot ${c.scope === 'org' ? 'on every server' : 'here'} for ${days} day${days === 1 ? '' : 's'}`,
+						: c.reward === 'win'
+							? `the first side to claim ${c.winClaims} wins the match`
+							: `reserved slot ${c.scope === 'org' ? 'on every server' : 'here'} for ${days} day${days === 1 ? '' : 's'}`,
 					c.claimMessage ? 'announces the claim' : '',
 					c.whisper ? 'whispers the claimer' : ''
 				]
@@ -1352,7 +1770,18 @@
 						: c.random
 							? `${ls.map((l) => lightingLabel(data.catalog, l)).join(', ')} at random`
 							: ls.map((l) => lightingLabel(data.catalog, l)).join(' → ');
-				return `${which} · every ${c.everyMinutes} min · at least ${c.minPlayers} on`;
+				const pct = (n: unknown) => (Number(n) < 100 ? ` (${n}%)` : '');
+				const scores = Array.isArray(c.scoreSteps) ? (c.scoreSteps as number[]) : [];
+				const minutes = Array.isArray(c.matchMinutes) ? (c.matchMinutes as number[]) : [];
+				return [
+					which,
+					Number(c.everyMinutes) > 0 ? `every ${c.everyMinutes} min${pct(c.everyChance ?? 100)}` : '',
+					scores.length ? `at scores ${scores.join(', ')}${pct(c.scoreChance)}` : '',
+					minutes.length ? `at ${minutes.join(', ')} min in${pct(c.minutesChance)}` : '',
+					`at least ${c.minPlayers} on`
+				]
+					.filter(Boolean)
+					.join(' · ');
 			}
 		}
 	}
@@ -1469,16 +1898,21 @@
 							{describe(t.kind, t.config)}
 						{/if}
 					</div>
-					{#if t.kind === 'bounty' && t.enabled && t.bounty}
-						{@const b = t.bounty}
-						<div class="mt-0.5 text-[12px] text-mist-100">
-							Open: <a
-								class="link"
-								href="/server/{id}/players/{b.steamId}"
-								data-sveltekit-preload-data="tap">{b.name}</a
-							>, marked at {b.streak} kills without dying · set
-							<span title={fmtTime(b.setAt)}>{fmtAgo(b.setAt, now)}</span>
-						</div>
+					{#if t.kind === 'bounty' && t.enabled && t.bounties?.length}
+						{#each t.bounties as b (b.steamId)}
+							<div class="mt-0.5 text-[12px] text-mist-100">
+								Open: <a
+									class="link"
+									href="/server/{id}/players/{b.steamId}"
+									data-sveltekit-preload-data="tap">{b.name}</a
+								>{b.faction ? ` (${b.faction})` : ''}, {b.how === 'top'
+									? `top of their side at ${b.streak} kills`
+									: b.how === 'manual'
+										? 'named by the rule'
+										: `marked at ${b.streak} kills without dying`} · set
+								<span title={fmtTime(b.setAt)}>{fmtAgo(b.setAt, now)}</span>
+							</div>
+						{/each}
 					{/if}
 					{#if t.kind === 'afk_protection' && t.enabled && t.phase}
 						{@const phase = t.phase}
@@ -1667,7 +2101,7 @@
 				>
 				name{r.fires === 1 ? '' : 's'}</span
 			>
-		{:else if r.kind === 'afk_watch'}
+		{:else if r.kind === 'afk_watch' || r.kind === 'infection'}
 			<span>Nothing to replay</span>
 		{:else if r.kind === 'death_whisper'}
 			<span
@@ -1675,6 +2109,20 @@
 					class={r.fires ? 'text-warn' : 'text-ok'}>{r.fires}</b
 				>
 				time{r.fires === 1 ? '' : 's'}</span
+			>
+		{:else if r.kind === 'kill_race'}
+			<span
+				>Replayed the last 24 h on this server: a side would have won <b
+					class={r.fires ? 'text-warn' : 'text-ok'}>{r.fires}</b
+				>
+				match{r.fires === 1 ? '' : 'es'}</span
+			>
+		{:else if r.kind === 'economic_war'}
+			<span
+				>Estimated over the last 24 h on this server: a side would have won <b
+					class={r.fires ? 'text-warn' : 'text-ok'}>{r.fires}</b
+				>
+				match{r.fires === 1 ? '' : 'es'}</span
 			>
 		{:else if r.kind === 'weather_cycle'}
 			<span
@@ -2102,19 +2550,73 @@
 						>
 					</fieldset>
 					<fieldset class="space-y-2">
-						<legend class="field-label">When</legend>
+						<legend class="field-label">When (each a roll of the dice)</legend>
 						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
 							Every
 							<input
 								class="input w-20 text-right"
 								type="number"
-								min="5"
+								min="0"
 								max="1440"
 								bind:value={f.everyMinutes}
-								aria-label="Every, minutes"
+								aria-label="Every, minutes (0 for never)"
 								required
 							/>
-							min, with at least
+							min (0: never), a
+							<input
+								class="input w-20 text-right"
+								type="number"
+								min="0"
+								max="100"
+								bind:value={f.everyChance}
+								aria-label="Chance on the clock, percent"
+							/>
+							% chance
+						</div>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							As the side ahead reaches the scores
+							<input
+								class="input w-40"
+								type="text"
+								data-plain
+								bind:value={f.scoreSteps}
+								placeholder="25, 50, 75"
+								aria-label="Scores of the side ahead"
+							/>
+							, a
+							<input
+								class="input w-20 text-right"
+								type="number"
+								min="0"
+								max="100"
+								bind:value={f.scoreChance}
+								aria-label="Chance at each score, percent"
+							/>
+							% chance at each
+						</div>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							At
+							<input
+								class="input w-40"
+								type="text"
+								data-plain
+								bind:value={f.matchMinutes}
+								placeholder="10, 20"
+								aria-label="Minutes into the match"
+							/>
+							min into the match, a
+							<input
+								class="input w-20 text-right"
+								type="number"
+								min="0"
+								max="100"
+								bind:value={f.minutesChance}
+								aria-label="Chance at each minute, percent"
+							/>
+							% chance at each
+						</div>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							Only with at least
 							<input
 								class="input w-20 text-right"
 								type="number"
@@ -2125,13 +2627,530 @@
 							/>
 							players on
 						</div>
+						<p class="text-[12px] text-mist-600">
+							Each moment rolls the dice once: 100% always changes, 0% never. Scores and minutes are
+							each rolled once a match (several passed at once roll once); leave them empty to use
+							the clock alone. A score or minute that comes up within a minute of a change is passed
+							over. Minutes count from the match's start as the panel saw it; for a match it came
+							into midway, from the game's clock when it sends one, else from then.
+						</p>
 					</fieldset>
 					<p class="note">
 						Changes the time of day and weather of the match being played, with no map change or
-						restart; the first change comes at once. The next map comes up on its rotation entry's
+						restart; the clock's first roll comes at once. The next map comes up on its rotation entry's
 						own lighting, and the rule changes that at its next turn. A change in order passes over
 						the lighting already on. Every change is under Recent actions and in the audit trail;
 						Discord hears only of the ones that fail. One rule per server.
+					</p>
+				{:else if f.kind === 'infection'}
+					<fieldset class="space-y-2 text-[13px]">
+						<legend class="field-label">Sides</legend>
+						<div class="flex flex-wrap gap-x-4 gap-y-1">
+							<label class="flex items-center gap-2"
+								><input
+									type="radio"
+									name="infection-sides"
+									checked={!!f.survivorFaction.trim()}
+									onchange={() =>
+										(f.survivorFaction =
+											FACTIONS.find(
+												(x) => x.toLowerCase() !== f.infectedFaction.trim().toLowerCase()
+											) ?? '')}
+								/> Two sides: infected against one survivors' faction</label
+							>
+							<label class="flex items-center gap-2"
+								><input
+									type="radio"
+									name="infection-sides"
+									checked={!f.survivorFaction.trim()}
+									onchange={() => (f.survivorFaction = '')}
+								/> Three sides: survivors on every other faction</label
+							>
+						</div>
+						<div class="flex flex-wrap items-center gap-2">
+							<span class="w-24">Infected</span>
+							<input
+								class="input w-40"
+								type="text"
+								list="infection-factions"
+								bind:value={f.infectedFaction}
+								maxlength="40"
+								aria-label="The infected faction"
+								required
+							/>
+						</div>
+						<div class="flex flex-wrap items-center gap-2">
+							<span class="w-24">Survivors</span>
+							{#if f.survivorFaction.trim()}
+								<input
+									class="input w-40"
+									type="text"
+									list="infection-factions"
+									bind:value={f.survivorFaction}
+									maxlength="40"
+									aria-label="The survivors' faction"
+									required
+								/>
+							{:else}
+								<span class="text-mist-100">Every faction but the infected's</span>
+							{/if}
+						</div>
+						<datalist id="infection-factions">
+							{#each FACTIONS as x (x)}<option value={x}></option>{/each}
+						</datalist>
+						<p class="text-[12px] text-mist-600">
+							Two sides: everyone not infected is moved onto the survivors' faction at the start,
+							and the third faction is closed (anyone who picks it is moved: onto the survivors'
+							side in the round's first minute, onto the infected after). On a full server that is
+							about two thirds of the players, moved a few a second. Three sides: survivors keep the
+							side they picked, so only the first infected move at the start.
+						</p>
+					</fieldset>
+					<fieldset class="space-y-2">
+						<legend class="field-label">Each round</legend>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							Starts with
+							<input
+								class="input w-20 text-right"
+								type="number"
+								min="1"
+								max="10"
+								bind:value={f.startInfected}
+								aria-label="Players infected at the start"
+								required
+							/>
+							infected, and one more for every
+							<input
+								class="input w-20 text-right"
+								type="number"
+								min="0"
+								max="100"
+								bind:value={f.perPlayers}
+								aria-label="One infected for every this many players (0 for none)"
+							/>
+							players (0: the count alone), picked at random, once at least
+							<input
+								class="input w-20 text-right"
+								type="number"
+								min="2"
+								max="1000"
+								bind:value={f.minPlayers}
+								aria-label="At least, players"
+								required
+							/>
+							players are on
+						</div>
+						<label class="flex items-start gap-2 text-[13px]"
+							><input type="checkbox" class="mt-0.5" bind:checked={f.respawnPatients} />
+							<span
+								>Respawn the first infected: move them with a kill, so they come back at the
+								infected side's spawn instead of switching sides where they stand. Their whisper
+								(below) tells them why.</span
+							></label
+						>
+						<label class="flex items-center gap-2 text-[13px]"
+							><input type="checkbox" bind:checked={f.endMatch} disabled={!canMatch} /> End the match
+							once everyone is infected, so the next round starts on the next map</label
+						>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							Time limit
+							<input
+								class="input w-20 text-right"
+								type="number"
+								min="0"
+								max="180"
+								bind:value={f.timeLimitMinutes}
+								disabled={!canMatch}
+								aria-label="Time limit, minutes (0 for none)"
+							/>
+							min from the round's start (0: none): survivors still standing when it runs out win, and
+							the match is ended. Announce the time left at
+							<input
+								class="input w-28"
+								type="text"
+								data-plain
+								bind:value={f.timeWarnings}
+								disabled={!canMatch}
+								placeholder="5, 1"
+								aria-label="Minutes left to announce"
+							/>
+							min
+						</div>
+						{#if !canMatch}
+							<p class="text-[12px] text-mist-600">
+								Ending the match, at a time limit or once everyone is infected, needs Match control.
+							</p>
+						{/if}
+						<label class="flex items-center gap-2 text-[13px]"
+							><input type="checkbox" bind:checked={f.unlockTeams} disabled={!canConfig} /> Unlock teams:
+							switch the game's Lock overpopulated teams off while this rule is on, and put back what
+							was set once it is off (the game reads it from the next match)</label
+						>
+						{#if !canConfig}
+							<p class="text-[12px] text-mist-600">
+								Switching the team lock needs Config &amp; settings. Without it, switch Lock
+								overpopulated teams off on the Config tab yourself.
+							</p>
+						{/if}
+						<label class="block space-y-1 text-[13px]"
+							><span class="text-mist-400">Announce the survivors left at</span>
+							<input
+								class="input w-48"
+								type="text"
+								data-plain
+								bind:value={f.milestones}
+								placeholder="25, 10, 5"
+							/></label
+						>
+					</fieldset>
+					<fieldset class="space-y-3">
+						<legend class="field-label">Messages (each optional)</legend>
+						{#each INFECTION_TEXTS as [k, title] (k)}
+							<label class="block space-y-1 text-[13px]"
+								><span class="text-mist-400">{title}</span>
+								<input
+									class="input"
+									type="text"
+									bind:value={f[k]}
+									maxlength={MAX_CHAT}
+									placeholder={k === 'infectBroadcast'
+										? '{name} was infected by {killer}. {survivors} survivors left.'
+										: ''}
+								/></label
+							>
+						{/each}
+						{@render placeholders('infection', [
+							f.startMessage,
+							f.patientWhisper,
+							f.infectWhisper,
+							f.infectBroadcast,
+							f.lastSurvivorMessage,
+							f.allInfectedMessage
+						])}
+						<p class="text-[12px] text-mist-600">
+							{'{patients}'} names the round's first infected, {'{killer}'} who infected a player,
+							{'{infected}'} and {'{survivors}'} count each side, {'{winner}'} is the faction ahead as
+							the match ends, {'{top}'} the round's top infector and {'{minutes}'} the time left. Empty
+							sends nothing.
+						</p>
+					</fieldset>
+					<p class="note">
+						The game's own scoring stands: the side with the most players in the control zone
+						scores, and the first to the cap wins. The infected start few, so the survivors score
+						first; each survivor they kill crosses over, until the infection holds the zone. The
+						survivors win by reaching the cap first, or by holding out until the time limit runs
+						out; the infection by reaching the cap, or by leaving nobody uninfected. As the match
+						ends the rule says which. A survivor killed by an infected player joins the infected:
+						moved at once, without the kill, so they respawn on that side. An infected player who
+						switches back is put back; a survivor who joins the infected stays infected, and anyone
+						who joins more than a minute into a round joins the infected. A new match starts a new
+						round. Needs the kill feed. While a Team balance rule is on, the rule waits. The game's
+						Lock overpopulated teams (on by default: a side two ahead takes no more players) can
+						refuse the moves onto the growing infected side: Unlock teams switches it off while the
+						rule is on and puts back what was set once it is off (from the next match, as the game
+						reads it); without it, switch it off on the Config tab: the rule's row warns while it is
+						on. Moves are under Recent actions and in the audit trail; Discord hears only of the
+						ones that fail. One rule per server.
+					</p>
+				{:else if f.kind === 'kill_race'}
+					<fieldset class="space-y-2">
+						<legend class="field-label">To win</legend>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							The first side to
+							<input
+								class="input w-24 text-right"
+								type="number"
+								min="5"
+								max="5000"
+								bind:value={f.raceTarget}
+								aria-label="Kills to win"
+								required
+							/>
+							kills wins, and the match is ended.
+						</div>
+						<label class="flex items-center gap-2 text-[13px]"
+							><input type="checkbox" bind:checked={f.headshotsOnly} /> Only headshots count</label
+						>
+						<label class="flex items-center gap-2 text-[13px]"
+							><input type="checkbox" bind:checked={f.teamKillsSubtract} /> A team kill takes one off
+							the killer's side</label
+						>
+					</fieldset>
+					<fieldset class="space-y-1.5 text-[13px]">
+						<legend class="field-label">Weapons that count</legend>
+						<div class="flex flex-wrap gap-x-4 gap-y-1">
+							<label class="flex items-center gap-2"
+								><input
+									type="radio"
+									name="race-weapons"
+									checked={!f.causes.length}
+									onchange={() => (f.causes = [])}
+								/> Every weapon</label
+							>
+							<label class="flex items-center gap-2"
+								><input
+									type="radio"
+									name="race-weapons"
+									checked={f.causes.length > 0}
+									onchange={() => {
+										if (!f.causes.length) f.causes = [...WEAPON_CLASSES[0].tags];
+									}}
+								/> Only these</label
+							>
+						</div>
+						{#if f.causes.length}
+							<div class="grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-3">
+								{#each WEAPON_CLASSES as wc (wc.key)}
+									<label class="flex items-center gap-2"
+										><input
+											type="checkbox"
+											checked={hasClass(f.causes, wc.tags)}
+											onchange={(e) =>
+												(f.causes = withClass(f.causes, wc.tags, e.currentTarget.checked))}
+										/>
+										{wc.label}</label
+									>
+								{/each}
+							</div>
+							{#each raceWeaponChoices(f.causes) as list (list.kind)}
+								{@const ticked = list.choices.filter((w) => holds(f.causes, w.cause)).length}
+								<details>
+									<summary class="cursor-pointer text-mist-400"
+										>{list.title}, one by one{ticked ? ` (${ticked})` : ''}</summary
+									>
+									<div class="mt-1 grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-3">
+										{#each list.choices as w (w.cause)}
+											<label class="flex items-center gap-2"
+												><input
+													type="checkbox"
+													checked={holds(f.causes, w.cause)}
+													onchange={(e) =>
+														(f.causes = e.currentTarget.checked
+															? [...f.causes, w.cause]
+															: f.causes.filter((c) => c.toLowerCase() !== w.cause.toLowerCase()))}
+												/>
+												{w.label}</label
+											>
+										{/each}
+									</div>
+								</details>
+							{/each}
+							<p class="text-[12px] text-mist-600">
+								Only kills with these count toward a side, the top killer and the standings. Name
+								them in the start message with {'{weapons}'} ("kills with Mosin Nagant, SV98"), so players
+								know. Classes are the panel's own grouping of the game's weapons.
+							</p>
+						{/if}
+					</fieldset>
+					<fieldset class="space-y-2">
+						<legend class="field-label">Along the way</legend>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							Announce the standings every
+							<input
+								class="input w-20 text-right"
+								type="number"
+								min="0"
+								max="5000"
+								bind:value={f.announceEvery}
+								aria-label="Announce the standings every, kills (0 for never)"
+							/>
+							kills of the leader (0: never)
+						</div>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							Time limit
+							<input
+								class="input w-20 text-right"
+								type="number"
+								min="0"
+								max="180"
+								bind:value={f.timeLimitMinutes}
+								aria-label="Time limit, minutes (0 for none)"
+							/>
+							min from the match's start (0: none): the side with the most kills then wins. Announce the
+							time left at
+							<input
+								class="input w-28"
+								type="text"
+								data-plain
+								bind:value={f.timeWarnings}
+								placeholder="5, 1"
+								aria-label="Minutes left to announce"
+							/>
+							min
+						</div>
+					</fieldset>
+					<fieldset class="space-y-3">
+						<legend class="field-label">Messages (each optional)</legend>
+						{#each RACE_TEXTS as [k, title] (k)}
+							<label class="block space-y-1 text-[13px]"
+								><span class="text-mist-400">{title}</span>
+								<input class="input" type="text" bind:value={f[k]} maxlength={MAX_CHAT} /></label
+							>
+						{/each}
+						{@render placeholders('kill_race', [
+							f.startMessage,
+							f.progressMessage,
+							f.timeLeftMessage,
+							f.winMessage,
+							f.drawMessage
+						])}
+						<p class="text-[12px] text-mist-600">
+							{'{standings}'} lists every side's kills, {'{winner}'} and {'{kills}'} the side that won
+							and its count, {'{top}'} the player with the most kills, {'{target}'} the kills to win and
+							{'{minutes}'} the time left. Empty sends nothing.
+						</p>
+					</fieldset>
+					<p class="note">
+						The game's own scoring still runs: a side that holds the control zone scores, and the
+						first to the cap ends the match. The rule counts each side's kills from the kill feed on
+						top of that, suicides and the environment left out, and the first side to the target
+						wins: the rule announces it and ends the match. A match the game ends first is told by
+						its kills as they stood. The counts are read from the kills stored for the match, so a
+						worker restart keeps them. Needs the kill feed and Match control. One rule per server.
+					</p>
+				{:else if f.kind === 'economic_war'}
+					<fieldset class="space-y-2">
+						<legend class="field-label">To win</legend>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							The first side to earn $
+							<input
+								class="input w-32 text-right"
+								type="number"
+								min="1000"
+								max="10000000"
+								step="100"
+								bind:value={f.econTarget}
+								aria-label="Cash to win"
+								required
+							/>
+							wins, and the match is ended.
+						</div>
+						<label class="flex items-center gap-2 text-[13px]"
+							><input type="checkbox" bind:checked={f.spendingCounts} /> Money spent counts against
+							the side (a vehicle, a loadout)</label
+						>
+						<p class="text-[12px] text-mist-600">
+							What counts is the cash each player earns while on a side, added up per side. With
+							money spent counting against, a drop in a player's cash is taken off their side and
+							them, unless their kills or deaths dropped with it (the game started their scoreboard
+							again: a reconnect, a new match). A side below 0 shows 0 and earns it back first.
+						</p>
+					</fieldset>
+					<fieldset class="space-y-2">
+						<legend class="field-label">Starting cash (not counted)</legend>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							The first
+							<input
+								class="input w-20 text-right"
+								type="number"
+								min="0"
+								max="300"
+								bind:value={f.matchGraceSeconds}
+								aria-label="Seconds of a match's start that do not count"
+							/>
+							s of a match count for nobody.
+						</div>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							A player who joins mid-match earns nothing for their first
+							<input
+								class="input w-20 text-right"
+								type="number"
+								min="0"
+								max="300"
+								bind:value={f.joinGraceSeconds}
+								aria-label="Seconds after a late joiner takes a side that do not count"
+							/>
+							s on a side.
+						</div>
+						<p class="text-[12px] text-mist-600">
+							The game hands out a starting cash nobody earned; these keep it out of the count (0 to
+							300 seconds each, 0: none). A player's cash when the rule first sees them never counts
+							either way. Set them to how long the game takes to hand it out, as the Players tab's
+							cash column shows.
+						</p>
+					</fieldset>
+					<fieldset class="space-y-2">
+						<legend class="field-label">Along the way</legend>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							Announce as the leader reaches
+							<input
+								class="input w-44"
+								type="text"
+								data-plain
+								bind:value={f.milestones}
+								placeholder="25, 50, 75, 90, 95"
+								aria-label="Percentages of the target to announce"
+							/>
+							% of the target (each once a match, 1 to 99)
+						</div>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							Announce the standings every $
+							<input
+								class="input w-28 text-right"
+								type="number"
+								min="0"
+								max="10000000"
+								step="100"
+								bind:value={f.announceEvery}
+								aria-label="Announce the standings every, cash (0 for never)"
+							/>
+							the leader earns (0: never)
+						</div>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							Time limit
+							<input
+								class="input w-20 text-right"
+								type="number"
+								min="0"
+								max="180"
+								bind:value={f.timeLimitMinutes}
+								aria-label="Time limit, minutes (0 for none)"
+							/>
+							min from the match's start (0: none): the side that earned the most then wins. Announce
+							the time left at
+							<input
+								class="input w-28"
+								type="text"
+								data-plain
+								bind:value={f.timeWarnings}
+								placeholder="5, 1"
+								aria-label="Minutes left to announce"
+							/>
+							min
+						</div>
+					</fieldset>
+					<fieldset class="space-y-3">
+						<legend class="field-label">Messages (each optional)</legend>
+						{#each ECON_TEXTS as [k, title] (k)}
+							<label class="block space-y-1 text-[13px]"
+								><span class="text-mist-400">{title}</span>
+								<input class="input" type="text" bind:value={f[k]} maxlength={MAX_CHAT} /></label
+							>
+						{/each}
+						{@render placeholders('economic_war', [
+							f.startMessage,
+							f.milestoneMessage,
+							f.progressMessage,
+							f.timeLeftMessage,
+							f.winMessage,
+							f.drawMessage
+						])}
+						<p class="text-[12px] text-mist-600">
+							{'{standings}'} lists what every side has earned, {'{leader}'} and {'{percent}'} the
+							side ahead and the share of the target it reached, {'{winner}'} and {'{cash}'} the side
+							that won and its earnings, {'{top}'} the player who earned the most (after what they
+							spent, when that counts), {'{target}'} the cash to win and {'{minutes}'} the time left.
+							Empty sends nothing.
+						</p>
+					</fieldset>
+					<p class="note">
+						The game's own scoring still runs: a side that holds the control zone scores, and the
+						first to the cap ends the match. The rule reads every player's cash on each look at the
+						player list (every couple of seconds while people are on): a rise goes to the side the
+						player is on, and the first side to the target wins: the rule announces it and ends the
+						match. A match the game ends first is told by the cash as it stood. The count is kept
+						across a worker restart in the same match, less the last few seconds. Needs Match
+						control. One rule per server.
 					</p>
 				{:else if f.kind === 'restart_skip'}
 					<div class="space-y-1.5 text-[13px]">
@@ -3317,19 +4336,60 @@
 				{:else if f.kind === 'bounty'}
 					<fieldset class="space-y-1.5 text-[13px]">
 						<legend class="field-label">Who gets a bounty</legend>
-						<div class="flex flex-wrap items-center gap-2">
-							A player who gets
-							<input
-								class="input w-20 text-right"
-								type="number"
-								min="3"
-								max="200"
-								bind:value={f.streak}
-								aria-label="Kills in a row without dying"
-								required
-							/>
-							kills in a row without dying in one match,
-						</div>
+						{#each [['streak', 'A run of kills without dying (one bounty on the server at a time)'], ['top', "Each side's top killers of the match"], ['manual', 'Players named here']] as [value, text] (value)}
+							<label class="flex items-center gap-2"
+								><input
+									type="radio"
+									name="bounty-pick"
+									{value}
+									checked={f.bountyPick === value}
+									onchange={() => {
+										const was = f.bountyPick;
+										f.bountyPick = value as BountyPickForm;
+										swapBounty(f, { reward: f.bountyReward, pick: was });
+									}}
+								/>
+								{text}</label
+							>
+						{/each}
+						{#if f.bountyPick === 'streak'}
+							<div class="flex flex-wrap items-center gap-2">
+								A player who gets
+								<input
+									class="input w-20 text-right"
+									type="number"
+									min="3"
+									max="200"
+									bind:value={f.streak}
+									aria-label="Kills in a row without dying"
+									required
+								/>
+								kills in a row without dying in one match,
+							</div>
+						{:else}
+							<div class="flex flex-wrap items-center gap-2">
+								Up to
+								<select
+									class="input w-16"
+									bind:value={f.perFaction}
+									aria-label="Bounties on each side"
+								>
+									{#each [1, 2, 3] as n (n)}<option value={n}>{n}</option>{/each}
+								</select>
+								at once on each side{#if f.bountyPick === 'top'}, the side's top killers once they
+									have at least
+									<input
+										class="input w-20 text-right"
+										type="number"
+										min="1"
+										max="200"
+										bind:value={f.minKills}
+										aria-label="At least, kills this match"
+										required
+									/>
+									kills this match{/if},
+							</div>
+						{/if}
 						<div class="flex flex-wrap items-center gap-2">
 							while at least
 							<input
@@ -3342,10 +4402,77 @@
 							/>
 							players are on
 						</div>
-						<p class="text-[12px] text-mist-600">
-							Team kills do not add to a run; any death ends it. One bounty at a time: the next goes
-							to whoever is on a run once this one ends.
-						</p>
+						{#if f.bountyPick === 'streak'}
+							<p class="text-[12px] text-mist-600">
+								Team kills do not add to a run; any death ends it. One bounty at a time: the next
+								goes to whoever is on a run once this one ends.
+							</p>
+						{:else if f.bountyPick === 'top'}
+							<p class="text-[12px] text-mist-600">
+								Kills are the scoreboard's for the match. While a side has fewer bounties open than
+								the limit, its top killers not yet marked are, highest first. A bounty stays on its
+								player until it is claimed or lapses, even if someone passes them; a player whose
+								bounty was claimed is not marked again that match.
+							</p>
+						{:else}
+							<div class="space-y-1.5">
+								{#each f.wanted as w (w.steamId)}
+									<div class="flex items-center gap-2">
+										<span class="text-mist-100">{w.name}</span>
+										<span class="font-mono text-[12px] text-mist-600">{w.steamId}</span>
+										{#if livePlayers.some((p) => p.steamId === w.steamId)}<Badge tone="ok">on</Badge
+											>{/if}
+										<button
+											type="button"
+											class="link text-[12px]"
+											onclick={() => (f.wanted = f.wanted.filter((x) => x.steamId !== w.steamId))}
+											>Remove</button
+										>
+									</div>
+								{:else}
+									<p class="text-[12px] text-warn">Name at least one player.</p>
+								{/each}
+								<div class="flex flex-wrap items-center gap-2">
+									<select
+										class="input w-56"
+										aria-label="Add a player who is on"
+										onchange={(e) => {
+											const el = e.currentTarget;
+											if (el.value) addWanted(f, el.value);
+											el.value = '';
+										}}
+									>
+										<option value="">Add a player who is on…</option>
+										{#each livePlayers.filter((p) => !f.wanted.some((w) => w.steamId === p.steamId)) as p (p.steamId)}
+											<option value={p.steamId}>{p.name}{p.faction ? ` (${p.faction})` : ''}</option
+											>
+										{/each}
+									</select>
+									<input
+										class="input w-48 font-mono"
+										type="text"
+										data-plain
+										placeholder="or a SteamID64"
+										bind:value={f.wantedInput}
+										aria-label="SteamID64 to add"
+									/>
+									<button
+										type="button"
+										class="btn btn-sm"
+										disabled={!f.wantedInput.trim()}
+										onclick={() => {
+											addWanted(f, f.wantedInput);
+											f.wantedInput = '';
+										}}>Add</button
+									>
+								</div>
+							</div>
+							<p class="text-[12px] text-mist-600">
+								A named player is marked whenever they are on and their side has fewer bounties open
+								than the limit, in the order named. Once their bounty is claimed they are not marked
+								again that match; the next match marks them again.
+							</p>
+						{/if}
 					</fieldset>
 					<fieldset class="space-y-1.5 text-[13px]">
 						<legend class="field-label">Reward for the first to kill them</legend>
@@ -3354,10 +4481,11 @@
 								class="flex items-center gap-2 {canSlotHere || canSlotOrg ? '' : 'text-mist-600'}"
 								><input
 									type="radio"
-									bind:group={f.bountyReward}
+									name="bounty-reward"
 									value="slot"
+									checked={f.bountyReward === 'slot'}
 									disabled={!canSlotHere && !canSlotOrg}
-									onchange={() => swapBounty(f)}
+									onchange={() => rewardTo(f, 'slot')}
 								/> A reserved slot for</label
 							>
 							<input
@@ -3395,12 +4523,38 @@
 								/> on every server in the organisation</label
 							>
 						</div>
+						<div class="flex flex-wrap items-center gap-2">
+							<label class="flex items-center gap-2 {canMatch ? '' : 'text-mist-600'}"
+								><input
+									type="radio"
+									name="bounty-reward"
+									value="win"
+									checked={f.bountyReward === 'win'}
+									disabled={!canMatch}
+									onchange={() => rewardTo(f, 'win')}
+								/> A point for their side: the first side to claim</label
+							>
+							<input
+								class="input w-20 text-right"
+								type="number"
+								min="1"
+								max="100"
+								bind:value={f.winClaims}
+								aria-label="Bounties a side claims to win the match"
+								disabled={f.bountyReward !== 'win'}
+							/>
+							bounties of the other sides wins, and the match is ended
+						</div>
+						{#if !canMatch}
+							<p class="pl-5 text-[12px] text-mist-600">Ending the match needs Match control.</p>
+						{/if}
 						<label class="flex items-center gap-2"
 							><input
 								type="radio"
-								bind:group={f.bountyReward}
+								name="bounty-reward"
 								value="none"
-								onchange={() => swapBounty(f)}
+								checked={f.bountyReward === 'none'}
+								onchange={() => rewardTo(f, 'none')}
 							/> Nothing but the announcement</label
 						>
 					</fieldset>
@@ -3416,6 +4570,20 @@
 						/>
 					</fieldset>
 					<fieldset class="space-y-2">
+						<legend class="field-label">Whisper the marked player, blank for none</legend>
+						<input
+							class="input"
+							type="text"
+							bind:value={f.markedWhisper}
+							maxlength={MAX_CHAT}
+							aria-label="Whisper the marked player"
+						/>
+						<p class="text-[12px] text-mist-600">
+							Only they see it, as the bounty is set: the announcement goes to everyone, and in a
+							busy chat they may not see it is them.
+						</p>
+					</fieldset>
+					<fieldset class="space-y-2">
 						<legend class="field-label">Announce the claim, blank for none</legend>
 						<input
 							class="input"
@@ -3425,6 +4593,23 @@
 							aria-label="Announce the claim"
 						/>
 					</fieldset>
+					{#if f.bountyReward === 'win'}
+						<fieldset class="space-y-2">
+							<legend class="field-label">Announce the win, blank for none</legend>
+							<input
+								class="input"
+								type="text"
+								bind:value={f.bountyWinMessage}
+								maxlength={MAX_CHAT}
+								aria-label="Announce the win"
+							/>
+							<p class="text-[12px] text-mist-600">
+								Sent as a side reaches the count, just before the panel ends the match.
+								{'{winner}'} is the side, {'{claims}'} its claims, {'{name}'} the player whose claim won
+								it. Claims count per match, so each match is a new hunt.
+							</p>
+						</fieldset>
+					{/if}
 					<fieldset class="space-y-2">
 						<legend class="field-label">Whisper the claimer, blank for none</legend>
 						<input
@@ -3435,13 +4620,22 @@
 							aria-label="Whisper the claimer"
 						/>
 					</fieldset>
-					{@render placeholders('bounty', [f.setMessage, f.claimMessage, f.whisper])}
+					{@render placeholders('bounty', [
+						f.setMessage,
+						f.markedWhisper,
+						f.claimMessage,
+						f.whisper,
+						f.bountyReward === 'win' ? f.bountyWinMessage : ''
+					])}
 					<p class="note">
 						{'{name}'} is the marked player when the bounty is set and the claimer after;
-						{'{target}'} is always the marked player, {'{streak}'} their run{#if f.bountyReward === 'slot'},
+						{'{target}'} is always the marked player, {'{streak}'}
+						{f.bountyPick === 'streak' ? 'their run' : 'their kills in the match when marked'}, {'{faction}'}
+						their side{#if f.bountyReward === 'slot'},
 							{'{reward}'} “a reserved slot for {Number(f.slotDays)}
-							day{Number(f.slotDays) === 1 ? '' : 's'}”{/if}. The bounty and the claim are broadcast
-						to the whole server.
+							day{Number(f.slotDays) === 1 ? '' : 's'}”{:else if f.bountyReward === 'win'},
+							{'{goal}'} the {Number(f.winClaims)} claims a side needs, {'{claims}'} the claimer's side's
+							so far{/if}. The bounty and the claim are broadcast to the whole server.
 					</p>
 					<p class="note">
 						The first enemy to kill the marked player claims it. Team kills, suicides and deaths to

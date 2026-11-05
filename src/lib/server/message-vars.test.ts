@@ -251,7 +251,11 @@ describe('the catalogue and the rules’ settings', () => {
 		kill_distance: { causes: ['Id.Item.Defibrillator.Standard'], action: 'kick', reason: 'a' },
 		seed_reward: { minutes: 30, message: 'a' },
 		afk_protection: { message: 'a', doneMessage: 'b' },
-		name_change: { action: 'kick', reason: 'a' }
+		name_change: { action: 'kick', reason: 'a' },
+		infection: { infectedFaction: 'Manticore', survivorFaction: 'Lonestar' },
+		kill_race: { target: 50 },
+		economic_war: { target: 20000 },
+		bounty: { reward: 'win', winClaims: 3 }
 	};
 	test('every message field the catalogue names is a text the rule keeps', () => {
 		for (const [kind, rule] of Object.entries(MESSAGE_RULES)) {

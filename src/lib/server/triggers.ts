@@ -25,8 +25,14 @@
 //                spares the seeders (afk-protection.ts)
 //   afk_watch    warn, then kick or flag, a player with no kill, death or cash earned for too long
 //                in a live match (afk-watch.ts)
-//   weather_cycle  change the time of day and weather every few minutes, in the match being played
-//                (weather-cycle.ts)
+//   weather_cycle  change the time of day and weather in the match being played: every few minutes,
+//                at scores and at minutes into a match, each with a chance (weather-cycle.ts)
+//   infection    a game mode: a few players start each round infected, and a survivor they kill
+//                joins them (infection.ts; the infections are acted on in feed-events.ts)
+//   kill_race    a team deathmatch: the first side to a number of kills wins and the match is
+//                ended (kill-race.ts; counted as kills arrive, in feed-events.ts)
+//   economic_war   a race to money: the first side to earn an amount of cash wins and the match is
+//                ended (economic-war.ts; counted from the player list at each look)
 //   death_whisper  whisper a player killed one of the rule's messages while they wait to respawn,
 //                at most once in a cooldown (death-whisper.ts, acted on in feed-events.ts)
 // The worker evaluates them on every observation and writes the actions they want to the outbox
@@ -54,6 +60,7 @@ import { writeAudit } from './audit';
 import { emit } from './events';
 import {
 	kills,
+	matches,
 	outbox,
 	playerSessions,
 	samples,
@@ -185,12 +192,16 @@ import {
 	bountyReplay,
 	bountyReward,
 	bountyScope,
-	bountyState,
 	bountyTrack,
 	forgetBounties,
+	bountyPick,
+	bountyPicks,
+	newMatch,
+	trackState,
 	lapseWords,
+	runWords,
 	rewardWords,
-	savedBounty,
+	savedBounties,
 	bountyVersion,
 	type BountyConfig,
 	type BountyKill,
@@ -227,11 +238,66 @@ import {
 import {
 	lightingName,
 	nextLighting,
+	rollWords,
+	weatherStep,
+	type WeatherState,
 	WEATHER_CYCLE,
 	weatherCycleIndex,
 	weatherCycleSettingsKey,
 	type WeatherCycleConfig
 } from './weather-cycle';
+import {
+	INFECTION_MAX_MOVES_PER_LOOK,
+	infectionLook,
+	infectionMemory,
+	infectionSettingsKey,
+	infectionSpeaks,
+	keepInfections,
+	roundCounts,
+	same as sameFaction,
+	type InfectionConfig,
+	type InfectionMemory,
+	type InfectionMove,
+	type InfectionNews,
+	type InfectionPlayer
+} from './infection';
+import { unlockNote, type UnlockMemory } from './team-unlock-core';
+import {
+	keepRaces,
+	countedWords,
+	countsCause,
+	killRaceSettingsKey,
+	killRaceSpeaks,
+	knownRace,
+	raceAtMatchEnd,
+	raceClock,
+	standings as raceStandings,
+	type KillRaceConfig,
+	type RaceNews
+} from './kill-race';
+import {
+	econAtMatchEnd,
+	econClock,
+	econLook,
+	econRebase,
+	econRestore,
+	econSaved,
+	econStandings,
+	econStep,
+	econTally,
+	economicWarSettingsKey,
+	economicWarSpeaks,
+	ECONOMIC_WAR_GRACE_MS,
+	ECONOMIC_WAR_SAVE_MS,
+	keepEcon,
+	keepEcons,
+	knownEcon,
+	newEconMemory,
+	syncEconClock,
+	type EconNews,
+	type EconomicWarConfig
+} from './economic-war';
+import { fmtCash } from '$lib/cash';
 import {
 	deathBlanks,
 	deathVars,
@@ -240,6 +306,7 @@ import {
 	type WhisperedTracks
 } from './death-whisper';
 import { mapName } from '$lib/format';
+import type { TeamLock } from '$lib/team-lock';
 import { statsIn, usesStats } from '$lib/placeholders';
 import { settings } from './settings';
 import { playerStats, riskPerformanceFor } from './leaderboards';
@@ -263,6 +330,8 @@ const WINDOW_MS = 24 * 3600_000;
 const KILL_RATE_REPLAY_MAX = 200_000;
 /** The most kills one Name change dry run reads names from. */
 const NAME_CHANGE_REPLAY_MAX = 200_000;
+
+const KILL_RACE_REPLAY_MAX = 200_000;
 /** The most sessions it reads the listed names from (a busy server has a couple of thousand a day). */
 const NAME_SESSIONS_MAX = 20_000;
 
@@ -279,7 +348,7 @@ const shape = (t: TriggerRow): TriggerView => ({
 	fireCount: t.fireCount,
 	createdAt: t.createdAt ? t.createdAt.toISOString() : null,
 	...(t.kind === 'afk_protection' ? { phase: afkPhase(t.state) } : {}),
-	...(t.kind === 'bounty' ? { bounty: openBounty(t) } : {}),
+	...(t.kind === 'bounty' ? { bounties: openBounties(t) } : {}),
 	...(t.kind === 'live_name' ? { liveName: lastName(t.state) } : {})
 });
 
@@ -292,12 +361,16 @@ function lastName(state: unknown): TriggerView['liveName'] {
 		: null;
 }
 
-/** A Bounty rule's open bounty, as its row shows it: the one its last save holds, if any. */
-function openBounty(t: TriggerRow): TriggerView['bounty'] {
-	const b = savedBounty(t.state, bountyVersion(t));
-	return b
-		? { steamId: b.steamId, name: b.name, streak: b.streak, setAt: new Date(b.setAt).toISOString() }
-		: null;
+/** A Bounty rule's open bounties, as its row shows them: the ones its last save holds. */
+function openBounties(t: TriggerRow): TriggerView['bounties'] {
+	return savedBounties(t.state, bountyVersion(t)).open.map((b) => ({
+		steamId: b.steamId,
+		name: b.name,
+		faction: b.faction,
+		streak: b.streak,
+		how: b.how,
+		setAt: new Date(b.setAt).toISOString()
+	}));
 }
 
 /** Where an AFK protection rule stands, as its row shows it; null until the worker has looked. */
@@ -349,6 +422,9 @@ const RULE_NEEDS: Record<
 	team_kill: ['players.kick', 'kicks players'],
 	kill_rate: ['players.kick', 'flags players'],
 	two_teams: ['players.move', 'moves players between teams'],
+	infection: ['players.move', 'moves players between teams'],
+	kill_race: ['match.control', 'ends the match'],
+	economic_war: ['match.control', 'ends the match'],
 	afk_protection: ['players.kill', 'kills players'],
 	name_change: ['players.kick', 'flags or kicks players'],
 	rotation_shuffle: ['config.apply', 'rewrites the rotation in the config document'],
@@ -372,10 +448,14 @@ export function ruleNeeds(kind: TriggerKind, config: unknown): [Capability, stri
 		return SLOT_NEEDS[
 			(config as Partial<SeedRewardConfig> | null)?.scope !== 'server' ? 'org' : 'server'
 		];
-	if (kind === 'bounty')
-		return bountyReward(config) === 'slot'
+	if (kind === 'bounty') {
+		const reward = bountyReward(config);
+		return reward === 'slot'
 			? SLOT_NEEDS[bountyScope(config)]
-			: ['chat.send', 'messages players'];
+			: reward === 'win'
+				? ['match.control', 'ends the match for the side that claims enough bounties']
+				: ['chat.send', 'messages players'];
+	}
 	if (kind === 'kill_distance') {
 		const action = killDistanceAction(config);
 		if (action === 'ban') return banNeeds(killDistanceBanScope(config));
@@ -396,13 +476,36 @@ export function ruleNeeds(kind: TriggerKind, config: unknown): [Capability, stri
 function ruleAlsoNeeds(kind: TriggerKind, config: unknown): [Capability, string] | null {
 	if (kind === 'kill_distance' && killDistanceAction(config) === 'kill') return RULE_KILL_NEEDS[1];
 	if (kind === 'afk_watch' && afkWatchWarns(config)) return ['chat.send', 'whispers players'];
-	if (kind === 'bounty' && bountyReward(config) === 'slot')
+	if (kind === 'bounty' && bountyReward(config) !== 'none')
 		return ['chat.send', 'messages players'];
 	if (kind === 'two_teams' && str((config as Partial<TwoTeamsConfig> | null)?.message))
 		return ['chat.send', 'whispers players'];
 	const afk = config as Partial<AfkProtectionConfig> | null;
 	if (kind === 'afk_protection' && (str(afk?.message) || str(afk?.doneMessage)))
 		return ['chat.send', 'messages players'];
+	if (kind === 'infection' && infectionSpeaks(config as Partial<InfectionConfig> | null))
+		return ['chat.send', 'messages players'];
+	if (kind === 'kill_race' && killRaceSpeaks(config as Partial<KillRaceConfig> | null))
+		return ['chat.send', 'messages players'];
+	if (kind === 'economic_war' && economicWarSpeaks(config as Partial<EconomicWarConfig> | null))
+		return ['chat.send', 'messages players'];
+	return null;
+}
+
+/** A third need: an Infection rule that ends the match once everyone is infected, or at its time
+ *  limit. */
+function ruleEndsMatch(kind: TriggerKind, config: unknown): [Capability, string] | null {
+	const c = config as Partial<InfectionConfig> | null;
+	if (kind === 'infection' && (c?.endMatch === true || Number(c?.timeLimitMinutes) > 0))
+		return ['match.control', 'ends the match'];
+	return null;
+}
+
+/** A fourth: an Infection rule that switches the game's team lock off (and back) in the config
+ *  document (team-unlock.ts). */
+function ruleWritesConfig(kind: TriggerKind, config: unknown): [Capability, string] | null {
+	if (kind === 'infection' && (config as Partial<InfectionConfig> | null)?.unlockTeams === true)
+		return ['config.apply', "switches the game's team lock off in the config document"];
 	return null;
 }
 
@@ -412,7 +515,12 @@ export function requireRuleCaps(
 	server: ServerRow,
 	access: ServerAccess
 ): void {
-	for (const need of [ruleNeeds(kind, config), ruleAlsoNeeds(kind, config)]) {
+	for (const need of [
+		ruleNeeds(kind, config),
+		ruleAlsoNeeds(kind, config),
+		ruleEndsMatch(kind, config),
+		ruleWritesConfig(kind, config)
+	]) {
 		if (!need || access.caps.has(need[0])) continue;
 		const [cap, does] = need;
 		throw new ApiError(
@@ -553,9 +661,13 @@ export async function updateTrigger(
 
 /**
  * Kinds whose deletion acts on the server: a Live server name rule's own name is written back to the
- * config document, so deleting one needs what switching it off does.
+ * config document, and so is the team lock an Infection rule switched off, so deleting one needs
+ * what switching it off does.
  */
-const ACTS_WHEN_DELETED: TriggerKind[] = ['live_name'];
+const actsWhenDeleted = (row: TriggerRow): boolean =>
+	row.kind === 'live_name' ||
+	(row.kind === 'infection' &&
+		(row.config as Partial<InfectionConfig> | null)?.unlockTeams === true);
 
 export async function deleteTrigger(
 	env: Env,
@@ -566,7 +678,7 @@ export async function deleteTrigger(
 	id: string
 ): Promise<void> {
 	const row = await triggerOf(env, server.id, id);
-	if (ACTS_WHEN_DELETED.includes(row.kind)) requireRuleCaps(row.kind, row.config, server, access);
+	if (actsWhenDeleted(row)) requireRuleCaps(row.kind, row.config, server, access);
 	await env.db.delete(triggers).where(eq(triggers.id, row.id));
 	if (SETTINGS_KEYS[row.kind])
 		await dropQueued(env, row.id, 'The rule was deleted before this was sent.');
@@ -600,7 +712,10 @@ export const SETTINGS_KEYS: Partial<Record<string, (config: unknown) => string>>
 	afk_watch: (c) => afkWatchSettingsKey(c as AfkWatchConfig),
 	name_change: (c) => nameChangeSettingsKey(c as NameChangeConfig),
 	restart_skip: () => RESTART_SKIP_KEY,
-	weather_cycle: (c) => weatherCycleSettingsKey(c as WeatherCycleConfig)
+	weather_cycle: (c) => weatherCycleSettingsKey(c as WeatherCycleConfig),
+	infection: (c) => infectionSettingsKey(c as InfectionConfig),
+	kill_race: (c) => killRaceSettingsKey(c as KillRaceConfig),
+	economic_war: (c) => economicWarSettingsKey(c as EconomicWarConfig)
 };
 
 /**
@@ -660,6 +775,10 @@ export interface TickContext {
 	startedAt: number;
 	/** RestartTimeUtc the process started with ("HH:MM", UTC); null or absent when unset */
 	restartTimeUtc?: string | null;
+	/** the game's lock on overpopulated teams, from the config document; null or absent until read */
+	teamLock?: TeamLock | null;
+	/** an Infection rule's hold on that lock, as the worker keeps it (team-unlock.ts) */
+	teamUnlock?: UnlockMemory | null;
 	/** the match that ended between the previous look and this one, or null */
 	matchEnd: MatchEnd | null;
 	/** the first look after the server was out of reach: what happened meanwhile is unknown (a match
@@ -860,6 +979,12 @@ export async function evaluateTriggers(
 	const out: Evaluation = { intents: [], updates: [] };
 	// Stats are read only for a message that uses them, once per player whichever rules ask.
 	const read = statsReader(env, ctx.server.id);
+	keepRaces(ctx.server.id, new Set(rows.filter((r) => r.kind === 'kill_race').map((r) => r.id)));
+	keepEcons(ctx.server.id, new Set(rows.filter((r) => r.kind === 'economic_war').map((r) => r.id)));
+	keepInfections(
+		ctx.server.id,
+		new Set(rows.filter((r) => r.kind === 'infection').map((r) => r.id))
+	);
 	for (const row of rows) {
 		try {
 			switch (row.kind) {
@@ -913,14 +1038,26 @@ export async function evaluateTriggers(
 					await evalAfkWatch(ctx, row, row.config as AfkWatchConfig, out, read);
 					break;
 				case 'bounty':
-					// Kills move it on as they arrive (feed-events.ts); a look ends it.
-					evalBounty(env, ctx, row, row.config as BountyConfig, out);
+					// Kills move it on as they arrive (feed-events.ts); a look ends bounties, and with the
+					// top or named pick marks players.
+					await evalBounty(env, ctx, row, row.config as BountyConfig, out, read);
 					break;
 				case 'rotation_shuffle':
 					evalRotationShuffle(ctx, row, row.config as RotationShuffleConfig, out);
 					break;
 				case 'weather_cycle':
 					evalWeatherCycle(ctx, row, row.config as WeatherCycleConfig, out);
+					break;
+				case 'infection':
+					await evalInfection(ctx, row, row.config as InfectionConfig, out, read, rows);
+					break;
+				case 'kill_race':
+					// Counted as kills arrive (feed-events.ts); a look keeps the clock and the match's end.
+					evalKillRace(ctx, row, row.config as KillRaceConfig, out);
+					break;
+				case 'economic_war':
+					// Counted from the player list's cash at each look.
+					await evalEconomicWar(env, ctx, row, row.config as EconomicWarConfig, out);
 					break;
 				case 'live_name':
 					// Written at the look itself, after the rules (live-name-write.ts): no action is queued.
@@ -1663,36 +1800,711 @@ function evalRotationShuffle(
 }
 
 /**
- * Every `everyMinutes` while the rule's players are on, one change of the weather (weather-cycle.ts).
- * The row moves on at the decision, as a broadcast's does, so the cadence holds whatever delivery
- * makes of it.
+ * A Weather cycle rule at one look (weather-cycle.ts): the dice rolled for what came due (the clock,
+ * a score the side ahead reached, a minute into the match), and one change of the weather when any
+ * came up. The rule's state moves with every roll, so each is rolled once.
  */
 function evalWeatherCycle(
 	ctx: TickContext,
 	row: TriggerRow,
 	cfg: WeatherCycleConfig,
-	out: Evaluation
+	out: Evaluation,
+	rand: () => number = Math.random
 ) {
-	if (ctx.status.playerCount < cfg.minPlayers) return;
-	if (row.lastFiredAt && ctx.ts.getTime() - row.lastFiredAt.getTime() < cfg.everyMinutes * 60_000)
-		return;
-	const next = nextLighting(cfg, weatherCycleIndex(row.state), ctx.status.lighting);
-	if (!next) return;
-	const name = lightingName(next.lighting);
-	out.intents.push({
-		trigger: row,
-		action: WEATHER_CYCLE,
-		params: { rule: weatherCycleSettingsKey(cfg), lighting: next.lighting },
-		target: name,
-		okMessage: `Changed the weather to ${name}.`,
-		detail: { lighting: next.lighting, from: ctx.status.lighting },
-		steamId: null,
-		dedupeKey: key(row, ctx.ts.getTime())
-	});
-	const state = { index: next.index };
-	row.lastFiredAt = ctx.ts;
+	const now = ctx.ts.getTime();
+	const step = weatherStep(
+		cfg,
+		row.state,
+		{
+			now,
+			lead: Math.max(0, ...(ctx.status.scores ?? []).map((f) => Number(f.score) || 0)),
+			map: ctx.status.map,
+			matchEnded: !!ctx.matchEnd,
+			matchSeconds: ctx.status.matchSeconds ?? null,
+			lastFiredAt: row.lastFiredAt ? row.lastFiredAt.getTime() : null,
+			players: ctx.status.playerCount
+		},
+		rand
+	);
+	if (!step.dirty) return;
+	let state: WeatherState = step.state;
+	let lastResult: string | undefined;
+	let fired = false;
+	const hit = step.rolls.find((r) => r.hit);
+	if (step.change && hit) {
+		const next = nextLighting(cfg, weatherCycleIndex(state), ctx.status.lighting);
+		if (next) {
+			const name = lightingName(next.lighting);
+			const why = hit.why === 'every' ? '' : ` (${rollWords(hit)}, ${hit.chance}%)`;
+			out.intents.push({
+				trigger: row,
+				action: WEATHER_CYCLE,
+				params: { rule: weatherCycleSettingsKey(cfg), lighting: next.lighting },
+				target: name,
+				okMessage: `Changed the weather to ${name}.`,
+				detail: {
+					lighting: next.lighting,
+					from: ctx.status.lighting,
+					why: hit.why,
+					at: hit.at,
+					chance: hit.chance
+				},
+				steamId: null,
+				dedupeKey: key(row, now)
+			});
+			state = { ...state, index: next.index };
+			fired = true;
+			lastResult = `Changing to ${name}${why}`;
+		}
+	}
+	if (!fired && step.rolls.length)
+		lastResult = `Kept the weather: ${step.rolls
+			.map((r) => `${rollWords(r)} ${r.hit ? 'came up' : 'missed'} at ${r.chance}%`)
+			.join(', ')}`;
 	row.state = state;
-	out.updates.push({ id: row.id, lastFiredAt: ctx.ts, lastResult: `Changing to ${name}`, state });
+	if (fired) row.lastFiredAt = ctx.ts;
+	out.updates.push({
+		id: row.id,
+		...(fired ? { lastFiredAt: ctx.ts } : {}),
+		...(lastResult ? { lastResult } : {}),
+		state
+	});
+}
+
+/**
+ * An Infection rule at one look (infection.ts): the round's start once the players are in, the moves
+ * that keep everyone on the side their role says, and what the round has come to. A Team balance
+ * rule on the same server would put the infected back on the smaller side, so the round waits while
+ * one is on.
+ */
+async function evalInfection(
+	ctx: TickContext,
+	row: TriggerRow,
+	cfg: InfectionConfig,
+	out: Evaluation,
+	read: StatsReader,
+	rows: TriggerRow[]
+) {
+	if (rows.some((r) => r.kind === 'two_teams')) {
+		const paused = 'Paused: switch off Team balance on this server to play Infection';
+		if (row.lastResult !== paused) {
+			row.lastResult = paused;
+			out.updates.push({ id: row.id, lastResult: paused });
+		}
+		return;
+	}
+	const config = infectionSettingsKey(cfg);
+	const mem = infectionMemory(ctx.server.id, row.id, config);
+	if (!ctx.playersObserved && !ctx.matchEnd) return;
+	const players: InfectionPlayer[] = ctx.playersObserved
+		? ctx.players.map((p) => ({ steamId: p.steamId, name: p.name, faction: p.faction }))
+		: [];
+	const now = ctx.ts.getTime();
+	const look = infectionLook(cfg, mem, {
+		players,
+		factions: (ctx.status.scores ?? []).map((s) => s.name),
+		matchEnded: !!ctx.matchEnd,
+		winner: ctx.matchEnd?.winner ?? null,
+		now,
+		// a few moves a second, as Team balance sends them
+		perLook: Math.min(
+			INFECTION_MAX_MOVES_PER_LOOK,
+			Math.max(
+				1,
+				Math.floor((TWO_TEAMS_MOVES_PER_SECOND * Math.max(ctx.playersIntervalMs, 1000)) / 1000)
+			)
+		)
+	});
+	const about = (p: InfectionPlayer | null): Player | null =>
+		p
+			? (ctx.players.find((q) => q.steamId === p.steamId) ?? {
+					...p,
+					kills: 0,
+					deaths: 0,
+					cash: 0,
+					ping: null
+				})
+			: null;
+	const stats = await statsFor(
+		read,
+		look.news.flatMap((n) =>
+			n.kind === 'last' ? [{ steamId: n.survivor.steamId, text: cfg.lastSurvivorMessage }] : []
+		),
+		{ org: false }
+	);
+	const say: InfectionSay = (text, p, own) =>
+		renderTemplate(
+			text,
+			keptVars(vars(ctx, about(p), p ? statsOf(stats, p.steamId) : {}, own)),
+			MAX_CHAT
+		);
+	pushInfection(out, row, cfg, mem, players, { moves: look.moves, news: look.news }, say, now);
+	// The game's own lock on a side too far ahead fights the infection, whose side grows with every
+	// kill: the row says beside how the round stands whether it is on, being switched off by the rule
+	// (Unlock teams), or switched off and waiting for the next match. A match end is that next match.
+	if (ctx.matchEnd && ctx.teamUnlock) ctx.teamUnlock.pending = false;
+	const lock = unlockNote(cfg.unlockTeams, ctx.teamLock, ctx.teamUnlock ?? null);
+	const base = look.result ?? row.lastResult.split(INFECTION_LOCK_MARK)[0];
+	const line = base && lock ? `${base}${INFECTION_LOCK_MARK}${lock}` : base || lock;
+	if (line && line !== row.lastResult) {
+		row.lastResult = line;
+		out.updates.push({
+			id: row.id,
+			...(look.moves.length || look.news.length ? { lastFiredAt: ctx.ts } : {}),
+			lastResult: line.slice(0, 300)
+		});
+	}
+}
+
+const INFECTION_LOCK_MARK = ' · ';
+
+/**
+ * A Kill race rule at one look (kill-race.ts): as a match ends, the race as its kills stood (when
+ * the game's cap came first) and the next match's opening line; between, the time limit's clock.
+ */
+function evalKillRace(ctx: TickContext, row: TriggerRow, cfg: KillRaceConfig, out: Evaluation) {
+	const mem = knownRace(row.id, killRaceSettingsKey(cfg));
+	const say = (text: string, own: MessageVars) =>
+		renderTemplate(text, keptVars(vars(ctx, null, {}, own)), MAX_CHAT);
+	if (ctx.matchEnd) {
+		if (mem) pushRace(out, row, cfg, mem.match, raceAtMatchEnd(mem), say);
+		if (cfg.startMessage)
+			out.intents.push({
+				trigger: row,
+				action: 'broadcast',
+				params: {
+					message: say(cfg.startMessage, { target: cfg.target, weapons: countedWords(cfg) }),
+					rule: killRaceSettingsKey(cfg)
+				},
+				target: 'start',
+				okMessage: 'Announced the kill race.',
+				detail: { stage: 'start', target: cfg.target },
+				steamId: null,
+				dedupeKey: key(row, 'start', ctx.ts.getTime())
+			});
+		return;
+	}
+	if (!mem) return;
+	pushRace(out, row, cfg, mem.match, raceClock(cfg, mem, ctx.ts.getTime()), say);
+}
+
+/**
+ * The actions of a Kill race rule's news: the standings, the time left, and the result, with the
+ * match ended when the race decided it (the target reached, or the time up). Keyed by the match, so
+ * a restart that decides it again sends nothing twice.
+ */
+export function pushRace(
+	out: Evaluation,
+	row: TriggerRow,
+	cfg: KillRaceConfig,
+	match: string,
+	news: RaceNews[],
+	say: (text: string, own: MessageVars) => string
+): void {
+	const config = killRaceSettingsKey(cfg);
+	const broadcast = (text: string, subject: string, detail: Record<string, unknown>, k: string) => {
+		if (!text) return;
+		out.intents.push({
+			trigger: row,
+			action: 'broadcast',
+			params: { message: text, rule: config },
+			target: text,
+			okMessage: `Announced ${subject}.`,
+			detail: { match, ...detail },
+			steamId: null,
+			dedupeKey: key(row, match, k)
+		});
+	};
+	const end = (why: string) =>
+		out.intents.push({
+			trigger: row,
+			action: 'endMatch',
+			params: { rule: config },
+			target: 'match',
+			okMessage: `Ended the match: ${why}.`,
+			detail: { match, stage: 'end' },
+			steamId: null,
+			dedupeKey: key(row, match, 'end')
+		});
+	for (const n of news) {
+		const table = raceStandings(n.tally);
+		const own = (extra: MessageVars = {}): MessageVars => ({
+			target: cfg.target,
+			weapons: countedWords(cfg),
+			standings: table,
+			top: n.tally.top ? `${n.tally.top.name} (${n.tally.top.kills})` : 'nobody',
+			...extra
+		});
+		if (n.kind === 'progress') {
+			const lead = n.tally.sides[0]?.kills ?? 0;
+			broadcast(
+				cfg.progressMessage && say(cfg.progressMessage, own()),
+				'the standings',
+				{ stage: 'progress', standings: table },
+				`progress:${cfg.announceEvery ? Math.floor(lead / cfg.announceEvery) : lead}`
+			);
+		} else if (n.kind === 'time') {
+			broadcast(
+				cfg.timeLeftMessage && say(cfg.timeLeftMessage, own({ minutes: n.minutes })),
+				`${n.minutes} min left`,
+				{ stage: 'time', minutes: n.minutes },
+				`time:${n.minutes}`
+			);
+		} else if (n.kind === 'win') {
+			broadcast(
+				cfg.winMessage && say(cfg.winMessage, own({ winner: n.winner, kills: n.kills })),
+				`${n.winner}'s win`,
+				{ stage: 'win', winner: n.winner, kills: n.kills, why: n.why, standings: table },
+				'result'
+			);
+			if (n.why !== 'match')
+				end(
+					n.why === 'target'
+						? `${n.winner} reached ${cfg.target} kills`
+						: `time is up, ${n.winner} ahead on kills`
+				);
+			out.updates.push({
+				id: row.id,
+				lastFiredAt: new Date(),
+				lastResult: `${n.winner} won with ${n.kills} kills (${table})`.slice(0, 300)
+			});
+		} else {
+			const kills = n.tally.sides[0]?.kills ?? 0;
+			broadcast(
+				cfg.drawMessage && say(cfg.drawMessage, own({ kills })),
+				'a draw',
+				{ stage: 'draw', why: n.why, standings: table },
+				'result'
+			);
+			if (n.why === 'time') end('time is up, a draw on kills');
+			out.updates.push({
+				id: row.id,
+				lastFiredAt: new Date(),
+				lastResult: `A draw at ${kills} kills (${table})`.slice(0, 300)
+			});
+		}
+	}
+}
+
+/** The panel's open match on a server (matches.id), or null between matches. */
+async function openMatchId(env: Env, serverId: string): Promise<number | null> {
+	const [m] = await env.db
+		.select({ id: matches.id })
+		.from(matches)
+		.where(and(eq(matches.serverId, serverId), isNull(matches.endedAt)))
+		.orderBy(desc(matches.id))
+		.limit(1);
+	return m ? Number(m.id) : null;
+}
+
+/**
+ * An Economic War rule at one look (economic-war.ts): as a match ends, the war as its money stood
+ * (when the game's cap came first) and the next match's opening line; between, each player's cash
+ * earned since the last look goes to their side, the standings and the win as the leader passes
+ * the steps and the target, and the time limit's clock. The count is written to the rule's row now
+ * and then, so a worker restart in the same match takes it up again.
+ */
+async function evalEconomicWar(
+	env: Env,
+	ctx: TickContext,
+	row: TriggerRow,
+	cfg: EconomicWarConfig,
+	out: Evaluation
+): Promise<void> {
+	const now = ctx.ts.getTime();
+	const settingsKey = economicWarSettingsKey(cfg);
+	const teams = ctx.status.scores.map((f) => f.name).filter(Boolean);
+	const say = (text: string, own: MessageVars) =>
+		renderTemplate(text, keptVars(vars(ctx, null, {}, own)), MAX_CHAT);
+	let mem = knownEcon(row.id, settingsKey);
+	if (ctx.matchEnd) {
+		if (mem) pushEcon(out, row, cfg, mem.match, econAtMatchEnd(mem, econTally(mem, teams)), say);
+		// the next match: everyone's cash as it stands is where they start from
+		mem = newEconMemory(settingsKey, ctx.status.map, now, true, cfg.matchGraceSeconds * 1000);
+		keepEcon(row.id, ctx.server.id, mem);
+		if (ctx.playersObserved)
+			econLook(mem, ctx.players, teams, now, cfg.joinGraceSeconds * 1000, cfg.spendingCounts);
+		if (cfg.startMessage)
+			out.intents.push({
+				trigger: row,
+				action: 'broadcast',
+				params: {
+					message: say(cfg.startMessage, { target: fmtCash(cfg.target) }),
+					rule: settingsKey
+				},
+				target: 'start',
+				okMessage: 'Announced the economic war.',
+				detail: { match: mem.match, stage: 'start', target: cfg.target },
+				steamId: null,
+				dedupeKey: key(row, mem.match, 'start')
+			});
+		return;
+	}
+	let fresh = false;
+	if (!mem || mem.map !== ctx.status.map) {
+		// A worker that has no memory of the rule (a restart, the rule switched on or changed) takes
+		// up what the row holds for this match; another map is another match, its end unseen.
+		const restart = !mem;
+		mem = newEconMemory(settingsKey, ctx.status.map, now, false);
+		keepEcon(row.id, ctx.server.id, mem);
+		if (restart) {
+			const open = await openMatchId(env, ctx.server.id);
+			if (econRestore(mem, row.state, open)) mem.savedAt = now;
+		}
+		fresh = true;
+	}
+	syncEconClock(mem, now, ctx.status.matchSeconds);
+	if (ctx.recovered) econRebase(mem);
+	else if (ctx.playersObserved)
+		econLook(mem, ctx.players, teams, now, cfg.joinGraceSeconds * 1000, cfg.spendingCounts);
+	const t = econTally(mem, teams);
+	pushEcon(
+		out,
+		row,
+		cfg,
+		mem.match,
+		[...econStep(cfg, mem, t, fresh), ...econClock(cfg, mem, t, now)],
+		say
+	);
+	if (mem.dirty && (mem.decided || now - mem.savedAt >= ECONOMIC_WAR_SAVE_MS)) {
+		// the panel's row of the match is read once the match is well under way (not at its
+		// first look, when the new row may not be written yet)
+		if (mem.dbMatch === null && now - mem.clockFrom >= ECONOMIC_WAR_GRACE_MS)
+			mem.dbMatch = await openMatchId(env, ctx.server.id);
+		if (mem.dbMatch !== null) {
+			out.updates.push({ id: row.id, state: econSaved(mem, mem.dbMatch) });
+			mem.dirty = false;
+			mem.savedAt = now;
+		}
+	}
+}
+
+/**
+ * The actions of an Economic War rule's news: the standings, the time left, and the result, with
+ * the match ended when the war decided it (the target reached, or the time up). Keyed by the match,
+ * so a restart that decides it again sends nothing twice.
+ */
+export function pushEcon(
+	out: Evaluation,
+	row: TriggerRow,
+	cfg: EconomicWarConfig,
+	match: string,
+	news: EconNews[],
+	say: (text: string, own: MessageVars) => string
+): void {
+	const config = economicWarSettingsKey(cfg);
+	const broadcast = (text: string, subject: string, detail: Record<string, unknown>, k: string) => {
+		if (!text) return;
+		out.intents.push({
+			trigger: row,
+			action: 'broadcast',
+			params: { message: text, rule: config },
+			target: text,
+			okMessage: `Announced ${subject}.`,
+			detail: { match, ...detail },
+			steamId: null,
+			dedupeKey: key(row, match, k)
+		});
+	};
+	const end = (why: string) =>
+		out.intents.push({
+			trigger: row,
+			action: 'endMatch',
+			params: { rule: config },
+			target: 'match',
+			okMessage: `Ended the match: ${why}.`,
+			detail: { match, stage: 'end' },
+			steamId: null,
+			dedupeKey: key(row, match, 'end')
+		});
+	for (const n of news) {
+		const table = econStandings(n.tally);
+		const own = (extra: MessageVars = {}): MessageVars => ({
+			target: fmtCash(cfg.target),
+			standings: table,
+			top: n.tally.top ? `${n.tally.top.name} (${fmtCash(n.tally.top.cash)})` : 'nobody',
+			...extra
+		});
+		if (n.kind === 'progress') {
+			const lead = n.tally.sides[0]?.cash ?? 0;
+			broadcast(
+				cfg.progressMessage && say(cfg.progressMessage, own()),
+				'the standings',
+				{ stage: 'progress', standings: table },
+				`progress:${cfg.announceEvery ? Math.floor(lead / cfg.announceEvery) : lead}`
+			);
+		} else if (n.kind === 'milestone') {
+			broadcast(
+				cfg.milestoneMessage &&
+					say(cfg.milestoneMessage, own({ leader: n.leader, percent: n.percent })),
+				`${n.leader} at ${n.percent}%`,
+				{ stage: 'milestone', percent: n.percent, leader: n.leader, standings: table },
+				`pct:${n.percent}`
+			);
+		} else if (n.kind === 'time') {
+			broadcast(
+				cfg.timeLeftMessage && say(cfg.timeLeftMessage, own({ minutes: n.minutes })),
+				`${n.minutes} min left`,
+				{ stage: 'time', minutes: n.minutes },
+				`time:${n.minutes}`
+			);
+		} else if (n.kind === 'win') {
+			const cash = fmtCash(n.cash);
+			broadcast(
+				cfg.winMessage && say(cfg.winMessage, own({ winner: n.winner, cash })),
+				`${n.winner}'s win`,
+				{ stage: 'win', winner: n.winner, cash: n.cash, why: n.why, standings: table },
+				'result'
+			);
+			if (n.why !== 'match')
+				end(
+					n.why === 'target'
+						? `${n.winner} earned ${fmtCash(cfg.target)}`
+						: `time is up, ${n.winner} ahead on cash earned`
+				);
+			out.updates.push({
+				id: row.id,
+				lastFiredAt: new Date(),
+				lastResult: `${n.winner} won with ${cash} earned (${table})`.slice(0, 300)
+			});
+		} else {
+			const cash = fmtCash(n.tally.sides[0]?.cash ?? 0);
+			broadcast(
+				cfg.drawMessage && say(cfg.drawMessage, own({ cash })),
+				'a draw',
+				{ stage: 'draw', why: n.why, standings: table },
+				'result'
+			);
+			if (n.why === 'time') end('time is up, a draw on cash earned');
+			out.updates.push({
+				id: row.id,
+				lastFiredAt: new Date(),
+				lastResult: `A draw at ${cash} earned (${table})`.slice(0, 300)
+			});
+		}
+	}
+}
+
+/** How an Infection rule's text reads for a player (or none), with the rule's own placeholders. */
+export type InfectionSay = (
+	text: string,
+	player: InfectionPlayer | null,
+	own: MessageVars
+) => string;
+
+/**
+ * The actions of an Infection rule's look or kill batch: each move (alone, without the kill: an
+ * infected survivor is dead already, and a player put back respawns where they belong), each newly
+ * infected player's whisper and broadcast, and the round's news. Every row carries the settings it
+ * was decided under, so an edit or a switch-off drops what is still queued.
+ */
+export function pushInfection(
+	out: Evaluation,
+	row: TriggerRow,
+	cfg: InfectionConfig,
+	mem: InfectionMemory,
+	players: InfectionPlayer[],
+	what: {
+		moves?: InfectionMove[];
+		news?: InfectionNews[];
+		infected?: { victim: InfectionPlayer; killer: InfectionPlayer; eventId: string }[];
+	},
+	say: InfectionSay,
+	now: number
+): void {
+	const config = infectionSettingsKey(cfg);
+	const round = mem.round;
+	const counts = () => roundCounts(mem, players);
+	const own = (extra: MessageVars = {}): MessageVars => ({
+		team: cfg.infectedFaction,
+		infected: counts().infected,
+		survivors: counts().survivors,
+		...extra
+	});
+	const broadcast = (
+		message: string,
+		subject: string,
+		detail: Record<string, unknown>,
+		k: string
+	) => {
+		if (!message) return;
+		out.intents.push({
+			trigger: row,
+			action: 'broadcast',
+			params: { message, rule: config },
+			target: message,
+			okMessage: `Announced ${subject}.`,
+			detail: { round, ...detail },
+			steamId: null,
+			dedupeKey: key(row, round, k)
+		});
+	};
+	// The round's first infected: moved with a kill when the rule says, so they respawn on the
+	// infected side instead of switching sides where they stand
+	const respawn = (m: InfectionMove) =>
+		cfg.respawnPatients && m.why === 'start' && sameFaction(m.to, cfg.infectedFaction);
+	for (const m of what.moves ?? [])
+		out.intents.push({
+			trigger: row,
+			action: 'changeTeam',
+			params: {
+				steamId: m.steamId,
+				faction: m.to,
+				...(respawn(m) ? {} : { kill: false }),
+				from: m.from,
+				rule: config
+			},
+			target: m.steamId,
+			okMessage: `Moved ${m.name} to ${m.to}.`,
+			detail: { name: m.name, from: m.from, to: m.to, why: m.why, round },
+			steamId: m.steamId,
+			dedupeKey: key(row, round, m.steamId, now)
+		});
+	for (const i of what.infected ?? []) {
+		const victim = i.victim.name || i.victim.steamId;
+		const killer = i.killer.name || i.killer.steamId;
+		out.intents.push({
+			trigger: row,
+			action: 'changeTeam',
+			params: {
+				steamId: i.victim.steamId,
+				faction: cfg.infectedFaction,
+				kill: false,
+				from: i.victim.faction ?? '',
+				rule: config
+			},
+			target: i.victim.steamId,
+			okMessage: `${victim} was infected by ${killer}: moved to ${cfg.infectedFaction}.`,
+			detail: { name: victim, killer, to: cfg.infectedFaction, why: 'infected', round },
+			steamId: i.victim.steamId,
+			dedupeKey: key(row, round, i.victim.steamId, i.eventId)
+		});
+		if (cfg.infectWhisper)
+			out.intents.push({
+				trigger: row,
+				action: 'whisper',
+				params: {
+					steamId: i.victim.steamId,
+					message: say(cfg.infectWhisper, i.victim, own({ killer })),
+					rule: config
+				},
+				target: i.victim.steamId,
+				okMessage: `Whispered ${victim}.`,
+				detail: { name: victim, round },
+				steamId: i.victim.steamId,
+				dedupeKey: key(row, round, i.victim.steamId, i.eventId, 'told')
+			});
+		broadcast(
+			cfg.infectBroadcast && say(cfg.infectBroadcast, i.victim, own({ killer })),
+			`${victim}'s infection`,
+			{ name: victim, killer },
+			`${i.victim.steamId}:${i.eventId}:said`
+		);
+	}
+	for (const n of what.news ?? []) {
+		if (n.kind === 'start') {
+			const patients = n.patients.map((p) => p.name || p.steamId).join(', ');
+			broadcast(
+				cfg.startMessage && say(cfg.startMessage, null, own({ patients })),
+				'the round',
+				{ stage: 'start', patients },
+				'start'
+			);
+			// each first infected is told why their side changed
+			if (cfg.patientWhisper)
+				for (const p of n.patients)
+					out.intents.push({
+						trigger: row,
+						action: 'whisper',
+						params: {
+							steamId: p.steamId,
+							message: say(cfg.patientWhisper, p, own({ patients })),
+							rule: config
+						},
+						target: p.steamId,
+						okMessage: `Whispered ${p.name || p.steamId}: picked to carry the infection.`,
+						detail: { name: p.name || p.steamId, stage: 'patient', round },
+						steamId: p.steamId,
+						dedupeKey: key(row, round, p.steamId, 'patient')
+					});
+		} else if (n.kind === 'result') {
+			if (n.infectedWon === null) continue;
+			const text = n.infectedWon ? cfg.infectedWinMessage : cfg.survivorsWinMessage;
+			broadcast(
+				text &&
+					say(
+						text,
+						null,
+						own({
+							winner: n.winner ?? (n.infectedWon ? cfg.infectedFaction : 'the survivors'),
+							infected: n.infected,
+							survivors: n.survivors,
+							top: n.top ? `${n.top.name} (${n.top.count})` : 'nobody'
+						})
+					),
+				n.infectedWon ? 'the infection’s win' : 'the survivors’ win',
+				{
+					stage: 'result',
+					infectedWon: n.infectedWon,
+					timeUp: n.timeUp,
+					winner: n.winner,
+					top: n.top
+				},
+				'result'
+			);
+		} else if (n.kind === 'time') {
+			broadcast(
+				cfg.timeLeftMessage && say(cfg.timeLeftMessage, null, own({ minutes: n.minutes })),
+				`${n.minutes} min left`,
+				{ stage: 'time', minutes: n.minutes },
+				`time:${n.minutes}`
+			);
+		} else if (n.kind === 'timeup') {
+			out.intents.push({
+				trigger: row,
+				action: 'endMatch',
+				params: { rule: config },
+				target: 'match',
+				okMessage: 'Ended the match: time is up, the survivors held out.',
+				detail: { stage: 'timeup', round },
+				steamId: null,
+				dedupeKey: key(row, round, 'timeup')
+			});
+		} else if (n.kind === 'few') {
+			broadcast(
+				cfg.fewLeftMessage && say(cfg.fewLeftMessage, null, own()),
+				`${n.survivors} survivors left`,
+				{ stage: 'few', survivors: n.survivors },
+				`few:${n.survivors}`
+			);
+		} else if (n.kind === 'last') {
+			const name = n.survivor.name || n.survivor.steamId;
+			broadcast(
+				cfg.lastSurvivorMessage && say(cfg.lastSurvivorMessage, n.survivor, own()),
+				`the last survivor, ${name}`,
+				{ stage: 'last', name },
+				'last'
+			);
+		} else {
+			broadcast(
+				cfg.allInfectedMessage && say(cfg.allInfectedMessage, null, own()),
+				'the infection’s win',
+				{ stage: 'all' },
+				'all'
+			);
+			if (cfg.endMatch)
+				out.intents.push({
+					trigger: row,
+					action: 'endMatch',
+					params: { rule: config },
+					target: 'match',
+					okMessage: 'Ended the match: everyone is infected.',
+					detail: { stage: 'end', round },
+					steamId: null,
+					dedupeKey: key(row, round, 'end')
+				});
+		}
+	}
 }
 
 /**
@@ -1928,66 +2740,165 @@ async function evalAfkWatch(
 }
 
 /**
- * A Bounty rule at each look: a match end starts the runs over, and an open bounty lapses when the
- * match ends, when its player's session closes (gone past the leave grace, so a map change's empty
- * list is no leave), or at the first look after the server was out of reach (whatever happened
- * meanwhile, its restart among it, is unknown). Kills set and claim bounties as they arrive
- * (feed-events.ts). The bounty is let go here, before the look is written, so no kill claims it
- * meanwhile; a look whose write fails leaves it open on the rule's row only, where a restart reads
- * it back and the next look or claim lapses it (a claim checks the bounty's match).
+ * A Bounty rule at each look: a match end starts the runs and the claimed over, and an open bounty
+ * lapses when the match ends, when its player's session closes (gone past the leave grace, so a map
+ * change's empty list is no leave), or at the first look after the server was out of reach (whatever
+ * happened meanwhile, its restart among it, is unknown). With the top or named pick a look with a
+ * fresh player list then marks players (bountyPicks), each announced. Kills set (the streak pick)
+ * and claim bounties as they arrive (feed-events.ts). A bounty is let go here, before the look is
+ * written, so no kill claims it meanwhile; a look whose write fails leaves it open on the rule's row
+ * only, where a restart reads it back and the next look or claim lapses it (a claim checks the
+ * bounty's match).
  */
-function evalBounty(
+async function evalBounty(
 	env: Env,
 	ctx: TickContext,
 	row: TriggerRow,
 	cfg: BountyConfig,
-	out: Evaluation
+	out: Evaluation,
+	read: StatsReader
 ) {
 	const { version, track } = bountyTrack(row);
-	if (ctx.matchEnd || ctx.recovered) track.runs.clear();
-	const open = track.open;
-	if (!open) return;
-	const why: BountyLapse | null = ctx.matchEnd
-		? 'match'
-		: ctx.recovered
-			? 'lost'
-			: ctx.playersObserved && ctx.present && !ctx.present.has(open.steamId)
-				? 'left'
-				: null;
-	if (!why) return;
-	track.open = null;
-	const lapse = bountyLapse(
-		row,
-		cfg,
-		version,
-		open,
-		why,
-		ctx.ts,
-		ctx.matchEnd?.map ?? ctx.status.map
-	);
-	out.intents.push(lapse.intent);
-	out.updates.push(lapse.update);
+	if (ctx.recovered) track.runs.clear();
+	// a new match: runs, the claimed, each side's claims and the win start over, written to the row
+	const fresh = !!ctx.matchEnd && (track.wins.size > 0 || track.decided || track.claimed.size > 0);
+	if (ctx.matchEnd) newMatch(track);
+	const lapsed: { open: OpenBounty; why: BountyLapse }[] = [];
+	for (const open of track.open) {
+		const why: BountyLapse | null = ctx.matchEnd
+			? 'match'
+			: ctx.recovered
+				? 'lost'
+				: ctx.playersObserved && ctx.present && !ctx.present.has(open.steamId)
+					? 'left'
+					: null;
+		if (why) lapsed.push({ open, why });
+	}
+	track.open = track.open.filter((b) => !lapsed.some((l) => l.open === b));
+	const now = ctx.ts.getTime();
+	const on = Math.max(ctx.status.playerCount || 0, ctx.players.length);
+	const picked =
+		ctx.playersObserved && !ctx.matchEnd && !ctx.recovered
+			? bountyPicks(
+					cfg,
+					track,
+					ctx.players.map((p) => ({
+						steamId: p.steamId,
+						name: p.name,
+						faction: p.faction,
+						kills: p.kills
+					})),
+					{ canMark: on >= cfg.minPlayers, now }
+				)
+			: [];
+	if (!lapsed.length && !picked.length) {
+		if (fresh) {
+			const state = trackState(version, track);
+			row.state = state;
+			out.updates.push({ id: row.id, state });
+		}
+		return;
+	}
+	const map = ctx.matchEnd?.map ?? ctx.status.map;
+	const cards: BountyCard[] = [];
+	for (const { open, why } of lapsed) {
+		const lapse = bountyLapse(row, cfg, open, why, ctx.ts, map);
+		out.intents.push(lapse.intent);
+		out.updates.push(lapse.update);
+		cards.push(lapse.card);
+	}
+	if (picked.length) {
+		const reward = rewardWords(cfg);
+		const slot = cfg.reward === 'slot';
+		const until = slot ? new Date(now + cfg.slotDays * 86400_000).toISOString().slice(0, 10) : '';
+		// said to the whole server, so no org-wide stats
+		const stats = await statsFor(
+			read,
+			picked.flatMap((b) => [
+				{ steamId: b.steamId, text: cfg.setMessage },
+				{ steamId: b.steamId, text: cfg.markedWhisper ?? '' }
+			]),
+			{ org: false }
+		);
+		for (const b of picked) {
+			const p = ctx.players.find((x) => x.steamId === b.steamId) ?? null;
+			const told = keptVars(
+				vars(ctx, p, statsOf(stats, b.steamId), {
+					target: b.name,
+					streak: b.streak,
+					reward,
+					days: slot ? cfg.slotDays : '',
+					until,
+					goal: cfg.reward === 'win' ? cfg.winClaims : ''
+				})
+			);
+			const message = renderTemplate(cfg.setMessage, told, MAX_CHAT);
+			// the marked player is told it is them
+			if (cfg.markedWhisper)
+				out.intents.push({
+					trigger: row,
+					action: 'whisper',
+					params: {
+						steamId: b.steamId,
+						message: renderTemplate(cfg.markedWhisper, told, MAX_CHAT)
+					},
+					target: b.steamId,
+					okMessage: `Whispered ${b.name}: there is a bounty on them.`,
+					detail: { name: b.name, stage: 'marked' },
+					steamId: b.steamId,
+					dedupeKey: key(row, 'marked', b.steamId, b.setAt)
+				});
+			const why =
+				b.how === 'top' ? `${b.streak} kills, top of ${b.faction}` : `named, ${b.faction}`;
+			out.intents.push({
+				trigger: row,
+				action: 'broadcast',
+				params: { message },
+				target: b.steamId,
+				okMessage: `Announced the bounty on ${b.name} (${why}).`,
+				detail: { name: b.name, streak: b.streak, faction: b.faction, how: b.how, stage: 'set' },
+				steamId: null,
+				dedupeKey: key(row, 'set', b.steamId, b.setAt)
+			});
+			out.updates.push({
+				id: row.id,
+				lastFiredAt: ctx.ts,
+				lastResult: `Bounty on ${b.name} (${why})`
+			});
+			cards.push({
+				kind: 'set',
+				at: ctx.ts.toISOString(),
+				map: map || null,
+				reward,
+				orgWide: slot && cfg.scope === 'org',
+				how: b.how,
+				name: b.name,
+				faction: b.faction,
+				streak: b.streak
+			});
+		}
+	}
+	// the open bounties as they stand, on the last update (they are applied in order)
+	const state = trackState(version, track);
+	row.state = state;
+	out.updates[out.updates.length - 1].state = state;
 	const serverName = ctx.status.serverName || ctx.server.name;
-	(out.afterCommit ??= []).push(
-		() => void notifyBounty(env, ctx.server.id, serverName, [lapse.card])
-	);
+	(out.afterCommit ??= []).push(() => void notifyBounty(env, ctx.server.id, serverName, cards));
 }
 
 /**
  * What a bounty lapsing writes: the note in the trail (Recent actions, the Automation mirror), the
- * rule's row with no bounty open, and the card for a Bounties channel, posted once it is written.
+ * rule's row's line, and the card for a Bounties channel, posted once it is written. The caller puts
+ * the open bounties left on the row's state.
  */
 export function bountyLapse(
 	row: TriggerRow,
 	cfg: BountyConfig,
-	version: string,
 	open: OpenBounty,
 	why: BountyLapse,
 	at: Date,
 	map: string | null
 ): { intent: Intent; update: TriggerUpdate; card: BountyCard } {
-	const state = bountyState(version, null);
-	row.state = state;
 	const message = lapseWords(open, why);
 	return {
 		intent: {
@@ -2000,13 +2911,14 @@ export function bountyLapse(
 			steamId: null,
 			dedupeKey: key(row, 'lapse', open.steamId, open.setAt)
 		},
-		update: { id: row.id, lastFiredAt: at, lastResult: message, state },
+		update: { id: row.id, lastFiredAt: at, lastResult: message },
 		card: {
 			kind: 'lapse',
 			at: at.toISOString(),
 			map: map || null,
 			reward: rewardWords(cfg),
 			orgWide: cfg.reward === 'slot' && cfg.scope === 'org',
+			how: open.how,
 			name: open.name,
 			run: open.best,
 			why
@@ -2487,6 +3399,115 @@ export async function dryRun(
 		);
 		return result;
 	}
+	if (kind === 'economic_war') {
+		// No player's cash is kept look by look; the samples keep the cash each side held, a minute
+		// or so apart, which is what a replay can go on: a side's rise from one sample to the next is
+		// taken as earned. Money spent between two samples hides as much earned, and a player who
+		// joins with cash brings it in (the late joiners' grace is not replayed), so it is an
+		// estimate.
+		const c = cfg as EconomicWarConfig;
+		const [matchRows, sampleRows] = await Promise.all([
+			env.db.execute<{ id: number; startedAt: Date; endedAt: Date | null }>(sql`
+				SELECT id, started_at AS "startedAt", ended_at AS "endedAt"
+				  FROM matches
+				 WHERE server_id = ${server.id} AND started_at < ${to}
+				   AND (ended_at IS NULL OR ended_at >= ${from})
+				 ORDER BY started_at ASC`),
+			env.db.execute<{ ts: Date; cash: { name: string; cash: number }[] | null }>(sql`
+				SELECT ts, cash FROM samples
+				 WHERE server_id = ${server.id} AND ts >= ${from} AND ok AND cash IS NOT NULL
+				 ORDER BY ts ASC LIMIT ${REPLAY_ROWS_MAX}`)
+		]);
+		const spans = matchRows.map((m) => ({
+			id: Number(m.id),
+			from: new Date(m.startedAt).getTime(),
+			to: m.endedAt ? new Date(m.endedAt).getTime() : Infinity
+		}));
+		const held = new Map<number, Map<string, number>>();
+		const earned = new Map<number, Map<string, number>>();
+		const done = new Set<number>();
+		for (const s of sampleRows) {
+			const at = new Date(s.ts).getTime();
+			const m = spans.find((x) => at >= x.from && at < x.to);
+			if (!m || done.has(m.id) || !Array.isArray(s.cash)) continue;
+			const before = held.get(m.id);
+			const now = new Map(
+				s.cash.filter((f) => f && f.name).map((f) => [f.name, Number(f.cash) || 0])
+			);
+			held.set(m.id, now);
+			if (!before || at < m.from + c.matchGraceSeconds * 1000) continue;
+			const sides = earned.get(m.id) ?? new Map<string, number>();
+			earned.set(m.id, sides);
+			for (const [f, n] of now) {
+				const rise = n - (before.get(f) ?? n);
+				if (rise <= 0) continue;
+				const total = (sides.get(f) ?? 0) + rise;
+				sides.set(f, total);
+				if (total >= c.target && !done.has(m.id)) {
+					done.add(m.id);
+					push(new Date(at), `${f} earns ${fmtCash(c.target)}: the match is ended`);
+				}
+			}
+		}
+		result.notes.push(
+			`Estimated from the cash each side held in the samples of ${earned.size} match${earned.size === 1 ? '' : 'es'} in the last 24 hours: money spent between two samples hides as much earned, so the live rule, which reads every player's cash at each look, reaches the target sooner. A time limit is not replayed.`
+		);
+		if (sampleRows.length === REPLAY_ROWS_MAX)
+			result.notes.push(`Only the first ${REPLAY_ROWS_MAX} samples of the window were replayed.`);
+		return result;
+	}
+	if (kind === 'kill_race') {
+		const c = cfg as KillRaceConfig;
+		const killRows = await env.db.execute<{
+			match: number | null;
+			faction: string | null;
+			teamKill: boolean;
+			headshot: boolean;
+			cause: string | null;
+			ts: Date;
+		}>(sql`
+			SELECT match_row AS match, killer_faction AS faction, team_kill AS "teamKill", headshot,
+			       cause, ts
+			  FROM kills
+			 WHERE server_id = ${server.id} AND ts >= ${from} AND killer_steam_id IS NOT NULL
+			   AND NOT suicide AND match_row IS NOT NULL
+			 ORDER BY ts ASC LIMIT ${KILL_RACE_REPLAY_MAX}`);
+		const counts = new Map<number, Map<string, number>>();
+		const done = new Set<number>();
+		for (const k of killRows) {
+			if (k.match === null || !k.faction || done.has(k.match)) continue;
+			// only the rule's weapons, when it names any
+			if (!countsCause(c, k.cause)) continue;
+			const sides = counts.get(k.match) ?? new Map<string, number>();
+			counts.set(k.match, sides);
+			// a team kill counts against, when the rule says; otherwise a kill counts (a headshot,
+			// when only those do)
+			let delta = 0;
+			if (k.teamKill) delta = c.teamKillsSubtract ? -1 : 0;
+			else if (!c.headshotsOnly || k.headshot) delta = 1;
+			if (!delta) continue;
+			const n = Math.max(0, (sides.get(k.faction) ?? 0) + delta);
+			sides.set(k.faction, n);
+			if (n >= c.target) {
+				done.add(k.match);
+				push(new Date(k.ts), `${k.faction} reaches ${c.target} kills: the match is ended`);
+			}
+		}
+		result.notes.push(
+			`Replayed the kills the feed stored for ${counts.size} match${counts.size === 1 ? '' : 'es'} in the last 24 hours. A time limit is not replayed; a match the game ended first is told by its kills as they stood.`
+		);
+		if (killRows.length === KILL_RACE_REPLAY_MAX)
+			result.notes.push(
+				`Only the first ${KILL_RACE_REPLAY_MAX} kills of the window were replayed.`
+			);
+		return result;
+	}
+	if (kind === 'infection') {
+		result.notes.push(
+			'Faction moves are not kept in the session history, so a round cannot be replayed. Switch the rule on with a few players to see it live: who it moves and who it infects show under Actions as they happen.'
+		);
+		return result;
+	}
 	if (kind === 'two_teams') {
 		result.notes.push(
 			'Faction moves are not kept in the session history, so there is nothing to replay. Switch on Watch only to see live what the rule would move, under Actions, without moving anyone.'
@@ -2903,10 +3924,19 @@ export async function dryRun(
 		const reward = rewardWords(c);
 		const slot = c.reward === 'slot';
 		const counted = { set: 0, claim: 0, lapse: 0 };
+		let won = 0;
 		for (const o of outcomes) {
 			if (o.at < from.getTime()) continue;
-			counted[o.kind]++;
 			const at = new Date(o.at);
+			if (o.kind === 'win') {
+				won++;
+				note(
+					at,
+					`${o.faction} wins the bounty hunt with ${o.claims} claimed (${o.claimer.name || o.claimer.steamId}'s claim): the match would be ended`
+				);
+				continue;
+			}
+			counted[o.kind]++;
 			const b = o.bounty;
 			if (o.kind === 'set') {
 				const v = keptVars(
@@ -2918,25 +3948,32 @@ export async function dryRun(
 							streak: b.streak,
 							reward,
 							days: slot ? c.slotDays : '',
-							until: slot ? dateOf(new Date(o.at + c.slotDays * 86400_000)) : ''
+							until: slot ? dateOf(new Date(o.at + c.slotDays * 86400_000)) : '',
+							goal: c.reward === 'win' ? c.winClaims : ''
 						}
 					)
 				);
+				const how =
+					b.how === 'top'
+						? `${b.streak} kills, top of ${b.faction}`
+						: b.how === 'manual'
+							? `named, ${b.faction}`
+							: `${b.streak} kills`;
 				push(
 					at,
-					`bounty on ${b.name} (${b.streak} kills, ${o.players} on): ${renderTemplate(c.setMessage, v, MAX_CHAT)}`
+					`bounty on ${b.name} (${how}, ${o.players} on): ${renderTemplate(c.setMessage, v, MAX_CHAT)}`
 				);
 			} else if (o.kind === 'claim')
 				note(
 					at,
-					`claimed by ${o.claimer.name || o.claimer.steamId}: ${b.name} after a run of ${b.best}${slot ? `, ${reward}` : ''}`
+					`claimed by ${o.claimer.name || o.claimer.steamId}: ${b.name} (${runWords(b)})${slot ? `, ${reward}` : ''}`
 				);
 			else
 				note(
 					at,
 					o.why === 'left'
-						? `lapsed: ${b.name} left (a run of ${b.best})`
-						: `lapsed: the match ended, ${b.name} on a run of ${b.best}`
+						? `lapsed: ${b.name} left (${runWords(b)})`
+						: `lapsed: the match ended, ${b.name} still marked (${runWords(b)})`
 				);
 		}
 		const [feed] = await env.db
@@ -2949,7 +3986,13 @@ export async function dryRun(
 			);
 		const n = (x: number, one: string, many = `${one}s`) => `${x} ${x === 1 ? one : many}`;
 		result.notes.push(
-			`${n(counted.set, 'bounty', 'bounties')} set, ${counted.claim} claimed, ${counted.lapse} lapsed${open ? ', one still open' : ''}. Runs start over at each match, and nobody is marked while the server's samples show fewer than ${c.minPlayers} on.`
+			`${n(counted.set, 'bounty', 'bounties')} set, ${counted.claim} claimed, ${counted.lapse} lapsed${open.length ? `, ${open.length} still open` : ''}${c.reward === 'win' ? `, ${n(won, 'match', 'matches')} won by a side's ${c.winClaims} claims` : ''}. Runs start over at each match, and nobody is marked while the server's samples show fewer than ${c.minPlayers} on.${
+				bountyPick(c) === 'top'
+					? " A side's top killers are counted from the kills the feed stored, from each match's start."
+					: bountyPick(c) === 'manual'
+						? ' A named player counts as on from their first kill or death in a match until their session closes.'
+						: ''
+			}`
 		);
 		if (rows.length >= KILL_RATE_REPLAY_MAX)
 			result.notes.push(
@@ -3481,8 +4524,10 @@ export async function dryRun(
 	}
 	if (kind === 'weather_cycle') {
 		const c = cfg as WeatherCycleConfig;
-		let last: Date | null = null;
-		let index = -1;
+		// Every roll replayed as if it came up, so the list shows each moment the dice are rolled,
+		// with its chance; the live rule changes at that share of them.
+		let state: unknown = null;
+		let last: number | null = null;
 		/** what the server would show: the last change, until the samples show another map or lighting */
 		let showing = '';
 		let seen = '';
@@ -3493,23 +4538,42 @@ export async function dryRun(
 				seen = `${r.map}|${lighting}`;
 				showing = lighting;
 			}
-			if ((r.count ?? 0) < c.minPlayers) continue;
-			if (last && r.ts.getTime() - last.getTime() < c.everyMinutes * 60_000) continue;
+			const at = r.ts.getTime();
+			const scores = Array.isArray(r.scores) ? (r.scores as { score?: number }[]) : [];
+			const step = weatherStep(
+				c,
+				state,
+				{
+					now: at,
+					lead: Math.max(0, ...scores.map((f) => Number(f.score) || 0)),
+					map: r.map ?? '',
+					matchEnded: false,
+					matchSeconds: null,
+					lastFiredAt: last,
+					players: r.count ?? 0
+				},
+				() => 0
+			);
+			state = step.state;
+			const hit = step.rolls.find((x) => x.hit);
+			if (!step.change || !hit) continue;
 			const from = showing ? lightingName(showing) : 'the lighting on';
+			const chance = hit.chance < 100 ? `, ${hit.chance}% chance` : '';
+			const why = `${rollWords(hit)}${chance}`;
 			if (c.random) {
-				last = r.ts;
-				push(r.ts, `weather (${r.count} on): ${from} → another at random`);
+				last = at;
+				push(r.ts, `weather (${r.count} on, ${why}): ${from} → another at random`);
 				continue;
 			}
-			const next = nextLighting(c, index, showing);
+			const next = nextLighting(c, weatherCycleIndex(state), showing);
 			if (!next) continue;
-			last = r.ts;
-			index = next.index;
+			last = at;
+			state = { ...(state as WeatherState), index: next.index };
 			showing = next.lighting;
-			push(r.ts, `weather (${r.count} on): ${from} → ${lightingName(next.lighting)}`);
+			push(r.ts, `weather (${r.count} on, ${why}): ${from} → ${lightingName(next.lighting)}`);
 		}
 		result.notes.push(
-			`Times shown are the samples a change fell due at, with at least ${c.minPlayers} on. A new map comes up on its rotation entry's own lighting, which the rule changes at its next turn; a lighting the server does not list is not sent.`
+			`Times shown are the samples a change fell due at, with at least ${c.minPlayers} on.${c.everyChance < 100 || ((c.scoreSteps.length || c.matchMinutes.length) && (c.scoreChance < 100 || c.minutesChance < 100)) ? ' Each is a roll of the dice, shown as if it came up: the live rule changes at the chance shown.' : ''}${c.matchMinutes.length ? ' Minutes into a match are counted from the first sample of each match, so they read late for a match under way as the window opens.' : ''} A new map comes up on its rotation entry's own lighting, which the rule changes at its next turn; a lighting the server does not list is not sent.`
 		);
 		return result;
 	}

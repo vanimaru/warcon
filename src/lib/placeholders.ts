@@ -100,10 +100,56 @@ export const MESSAGE_RULES: Readonly<Partial<Record<TriggerKind, MessageRule>>> 
 	name_change: { fields: ['reason'], own: ['previous'], player: true },
 	// said to the whole server, so no org-wide stats: `{name}` is the marked player when the bounty is
 	// set and the claimer after, `{target}` always the marked player
+	// with the win reward: `{goal}` the claims a side needs, `{claims}` the claimer's side's so far,
+	// `{winner}` the side that won (in the win message)
 	bounty: {
-		fields: ['setMessage', 'claimMessage', 'whisper'],
-		own: ['target', 'streak', 'reward', 'days', 'until'],
+		fields: ['setMessage', 'markedWhisper', 'claimMessage', 'whisper', 'winMessage'],
+		own: ['target', 'streak', 'reward', 'days', 'until', 'goal', 'claims', 'winner'],
 		player: true,
+		kept: true
+	},
+	// said to the whole server or to the newly infected: `{name}` is the player the message is about
+	// (the newly infected, the last survivor), `{killer}` who infected them, `{patients}` the round's
+	// first infected; `{infected}` and `{survivors}` count the players on each side as it stands
+	infection: {
+		fields: [
+			'startMessage',
+			'patientWhisper',
+			'infectWhisper',
+			'infectBroadcast',
+			'fewLeftMessage',
+			'lastSurvivorMessage',
+			'allInfectedMessage',
+			'survivorsWinMessage',
+			'infectedWinMessage',
+			'timeLeftMessage'
+		],
+		own: ['killer', 'team', 'patients', 'infected', 'survivors', 'winner', 'top', 'minutes'],
+		player: true,
+		kept: true
+	},
+	// said to the whole server: `{standings}` is every side's kills, `{winner}` the side that won and
+	// `{kills}` its count, `{top}` the player with the most kills, `{target}` the kills to win
+	kill_race: {
+		fields: ['startMessage', 'progressMessage', 'winMessage', 'drawMessage', 'timeLeftMessage'],
+		own: ['target', 'weapons', 'standings', 'winner', 'kills', 'top', 'minutes'],
+		player: false,
+		kept: true
+	},
+	// said to the whole server: `{standings}` is every side's earnings, `{winner}` the side that won
+	// and `{cash}` what it earned, `{top}` the player who earned the most, `{target}` the cash to win,
+	// `{leader}` and `{percent}` the side ahead and the share of the target it reached
+	economic_war: {
+		fields: [
+			'startMessage',
+			'progressMessage',
+			'milestoneMessage',
+			'winMessage',
+			'drawMessage',
+			'timeLeftMessage'
+		],
+		own: ['target', 'standings', 'leader', 'percent', 'winner', 'cash', 'top', 'minutes'],
+		player: false,
 		kept: true
 	}
 };

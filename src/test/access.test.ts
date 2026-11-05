@@ -36,6 +36,40 @@ import { seedWorld, suspend, type World } from './world';
 const ROUTES = join(import.meta.dir, '..', 'routes');
 /** The kill feed's tag for the defibrillator, a Kill distance rule's usual weapon. */
 const DEFIB = 'Id.Item.Defibrillator.Standard';
+/** A Kill race rule that says nothing: it needs only Match control, to end the match. */
+const SILENT_RACE = {
+	target: 50,
+	startMessage: '',
+	progressMessage: '',
+	winMessage: '',
+	drawMessage: '',
+	timeLeftMessage: ''
+};
+/** An Economic War rule that says nothing: it needs only Match control, to end the match. */
+const SILENT_ECON = {
+	target: 20000,
+	startMessage: '',
+	progressMessage: '',
+	milestoneMessage: '',
+	winMessage: '',
+	drawMessage: '',
+	timeLeftMessage: ''
+};
+/** An Infection rule that says nothing: it needs only Move. */
+const SILENT_INFECTION = {
+	infectedFaction: 'Manticore',
+	survivorFaction: 'Lonestar',
+	startMessage: '',
+	patientWhisper: '',
+	infectWhisper: '',
+	infectBroadcast: '',
+	fewLeftMessage: '',
+	lastSurvivorMessage: '',
+	allInfectedMessage: '',
+	survivorsWinMessage: '',
+	infectedWinMessage: '',
+	timeLeftMessage: ''
+};
 
 describe.skipIf(!hasTestDb)('access', () => {
 	let env: Env;
@@ -537,6 +571,9 @@ describe.skipIf(!hasTestDb)('access', () => {
 				['kill_distance', { causes: [DEFIB], action: 'ban' }, 'bans.manage'],
 				['kill_distance', { causes: [DEFIB], action: 'ban', banScope: 'org' }, 'lists.ban'],
 				['two_teams', { closedFaction: 'Lonestar' }, 'players.move'],
+				['infection', SILENT_INFECTION, 'players.move'],
+				['kill_race', SILENT_RACE, 'match.control'],
+				['economic_war', SILENT_ECON, 'match.control'],
 				['afk_protection', {}, 'players.kill'],
 				['afk_watch', {}, 'players.kick'],
 				['afk_watch', { action: 'alert' }, 'players.kick'],
@@ -1418,7 +1455,10 @@ describe.skipIf(!hasTestDb)('access', () => {
 				rotation_shuffle: {},
 				live_name: { base: 'Demo Clan #1' },
 				restart_skip: {},
-				weather_cycle: { lightings: ['DayClear', 'DayLateRain'] }
+				weather_cycle: { lightings: ['DayClear', 'DayLateRain'] },
+				infection: SILENT_INFECTION,
+				kill_race: SILENT_RACE,
+				economic_war: SILENT_ECON
 			};
 			const save = (kind: string, name: string, config: Record<string, unknown>) =>
 				api(w, 'owner', 'POST api/servers/[id]/triggers', {
@@ -1434,6 +1474,63 @@ describe.skipIf(!hasTestDb)('access', () => {
 			}
 			for (const name of ['One', 'Two'])
 				expect((await save('welcome', name, { message: 'Hi' })).status).toBe(201);
+		});
+
+		test('an Infection rule that speaks needs Chat, one that ends the match Match control, and one that unlocks the teams Config', async () => {
+			const w = await seedWorld(env);
+			const params = { id: w.server.id };
+			const holds = (caps: string[]) =>
+				env.db
+					.update(orgRoles)
+					.set({ capabilities: ['server.view', 'automation.manage', 'players.move', ...caps] })
+					.where(eq(orgRoles.id, w.roles.viewer));
+			const save = (config: Record<string, unknown>) =>
+				api(w, 'viewer', 'POST api/servers/[id]/triggers', {
+					params,
+					body: { kind: 'infection', config }
+				});
+			// the texts a new rule starts with are said to the server
+			const speaks = { infectedFaction: 'Manticore', survivorFaction: 'Lonestar' };
+			const ends = { ...SILENT_INFECTION, endMatch: true };
+			// a time limit ends the match when it runs out
+			const timed = { ...SILENT_INFECTION, timeLimitMinutes: 20 };
+			await holds([]);
+			expect((await save(speaks)).status).toBe(403);
+			expect((await save(ends)).status).toBe(403);
+			expect((await save(timed)).status).toBe(403);
+			await holds(['chat.send']);
+			expect((await save(speaks)).status).toBe(201);
+			await holds(['match.control']);
+			const ended = await save(ends);
+			// past the check: one rule per server, and the server has one now
+			expect(ended.status).toBe(409);
+			// switching the game's team lock off writes the config document
+			const unlocks = { ...SILENT_INFECTION, unlockTeams: true };
+			await holds([]);
+			expect((await save(unlocks)).status).toBe(403);
+			await holds(['config.apply']);
+			expect((await save(unlocks)).status).toBe(409);
+		});
+
+		test('a Bounty rule whose reward is the match needs Match control and Chat', async () => {
+			const w = await seedWorld(env);
+			const params = { id: w.server.id };
+			const holds = (caps: string[]) =>
+				env.db
+					.update(orgRoles)
+					.set({ capabilities: ['server.view', 'automation.manage', ...caps] })
+					.where(eq(orgRoles.id, w.roles.viewer));
+			const save = () =>
+				api(w, 'viewer', 'POST api/servers/[id]/triggers', {
+					params,
+					body: { kind: 'bounty', config: { reward: 'win', winClaims: 3 } }
+				});
+			await holds(['chat.send']);
+			expect((await save()).status).toBe(403);
+			await holds(['match.control']);
+			expect((await save()).status).toBe(403);
+			await holds(['match.control', 'chat.send']);
+			expect((await save()).status).toBe(201);
 		});
 
 		test('a Team balance rule that whispers needs Chat as well', async () => {

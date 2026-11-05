@@ -13,6 +13,7 @@
 	import {
 		BOARD_COLUMNS,
 		BOARD_RANGES,
+		headshotRate,
 		kdRatio,
 		perHour,
 		perMinute,
@@ -209,7 +210,22 @@
 				{#if show('perHour')}
 					<SortHeader {sort} key="perHour" num title="Kills per hour of playtime">K/h</SortHeader>
 				{/if}
-				{#if show('headshots')}<th class="num" title="Headshots">HS</th>{/if}
+				{#if show('headshots')}
+					<SortHeader {sort} key="headshots" num title="Headshots">HS</SortHeader>
+				{/if}
+				{#if show('hsRate')}
+					<SortHeader {sort} key="hsRate" num title="Headshots per kill">HS%</SortHeader>
+				{/if}
+				{#if show('vehicleKills')}
+					<SortHeader {sort} key="vehicleKills" num title="Kills with a vehicle or its weapons"
+						>Veh</SortHeader
+					>
+				{/if}
+				{#if show('killStreak')}
+					<SortHeader {sort} key="killStreak" num title="Best kill streak in one match"
+						>Streak</SortHeader
+					>
+				{/if}
 				{#if show('teamKills')}<th class="num" title="Team kills">TK</th>{/if}
 				{#if show('matches')}<SortHeader {sort} key="matches" num>Matches</SortHeader>{/if}
 				{#if show('results')}
@@ -252,6 +268,9 @@
 						<td class="num">{ratio(perHour(r.kills, r.minutes, r.seedMinutes), 1)}</td>
 					{/if}
 					{#if show('headshots')}<td class="num">{r.headshots}</td>{/if}
+					{#if show('hsRate')}<td class="num">{pct(headshotRate(r.headshots, r.kills))}</td>{/if}
+					{#if show('vehicleKills')}<td class="num">{r.vehicleKills}</td>{/if}
+					{#if show('killStreak')}<td class="num">{r.killStreak}</td>{/if}
 					{#if show('teamKills')}
 						<td class="num {r.teamKills >= 3 ? 'text-warn' : ''}">{r.teamKills}</td>
 					{/if}
@@ -305,7 +324,7 @@
 			counts the matches that ended since it started; all time and the other ranges are in the picker.{/if}
 	</p>
 {/if}
-{#if board && !board.hasFeed && (show('headshots') || show('teamKills'))}
+{#if board && !board.hasFeed && (show('headshots') || show('hsRate') || show('vehicleKills') || show('killStreak') || show('teamKills'))}
 	<p class="note">
 		{query.scope === 'org' ? 'None of these servers has' : 'This server has no'} kill feed, so headshots,
 		team kills, suicides and streaks are not recorded; kills, deaths and results come from the game's

@@ -12,6 +12,7 @@ import { forLog, publicMessage } from './http';
 import type { OrgRow, ServerRow } from './access';
 import { ACTIONS, readConfig } from './actions';
 import { reservedSlotsHeld } from '../reserved-doc';
+import { teamLockFromConfig, type TeamLock } from '../team-lock';
 import { restartTimeFromConfig } from '../uptime';
 import { GameError, WardogsClient } from './rcon';
 import { matches, samples, serverLive } from './db/schema';
@@ -77,6 +78,7 @@ import { notifyWatchedJoins } from './webhook-delivery';
 import { nextDue, withHold } from './poller-schedule';
 import { cashByFaction } from '$lib/cash';
 import { keepName } from './live-name-write';
+import { keepTeamUnlock, wantsUnlock, type UnlockMemory } from './team-unlock';
 import type { NameMemory } from './live-name';
 import { takeFeedEnd, withFeedEnd, type ClosedMatch, type FeedEnd } from './match-feed';
 import { matchStateOf } from '$lib/match-state';
@@ -159,6 +161,10 @@ export interface ServerMemory {
 	healthUnserved: boolean;
 	/** the Live server name rule's write: its own name, to put back once it is off (live-name.ts) */
 	liveName: NameMemory | null;
+	/** an Infection rule's hold on the game's team lock, to put back once it is off (team-unlock.ts) */
+	teamUnlock: UnlockMemory | null;
+	/** the rules' rows have been read for a hold left by a switched-off rule, once per process */
+	teamUnlockRead: boolean;
 	/** observations completed */
 	count: number;
 }
@@ -179,6 +185,9 @@ export interface Identity {
 	restartTimeUtc: string | null;
 	/** restartTimeUtc has been read for this process start; a restart clears it */
 	restartTimeRead: boolean;
+	/** the game's lock on overpopulated teams, as the config document last read sets it; absent until
+	 *  read (the Infection rule warns while it is on) */
+	teamLock?: TeamLock | null;
 	features: Features | null;
 	/** when it was last (re)read; 0 asks the next observation to read it */
 	checkedAt: number;
@@ -245,6 +254,8 @@ export function memoryFor(server: ServerRow, org: OrgRow): ServerMemory {
 			startedAt: 0,
 			healthUnserved: false,
 			liveName: null,
+			teamUnlock: null,
+			teamUnlockRead: false,
 			count: 0
 		};
 		registry.set(server.id, m);
@@ -356,6 +367,7 @@ async function refreshIdentity(client: WardogsClient, m: ServerMemory, now: numb
 		const text = (await readConfig(client)).text;
 		next.reservedSlots = reservedSlotsHeld(text);
 		next.restartTimeUtcFile = restartTimeFromConfig(text);
+		next.teamLock = teamLockFromConfig(text);
 		if (!next.restartTimeRead) {
 			next.restartTimeUtc = next.restartTimeUtcFile;
 			next.restartTimeRead = true;
@@ -724,6 +736,8 @@ export async function observeServer(env: Env, m: ServerMemory, kinds: ObserveKin
 						performance: risk.performance,
 						startedAt: m.startedAt,
 						restartTimeUtc: m.identity.restartTimeUtc,
+						teamLock: m.identity.teamLock ?? null,
+						teamUnlock: m.teamUnlock,
 						matchEnd,
 						recovered: wasOffline,
 						// the lines the match stage will write, for the broadcast's {mvp} and {top}
@@ -848,6 +862,11 @@ export async function observeServer(env: Env, m: ServerMemory, kinds: ObserveKin
 	const nameRule = rows.find((r) => r.kind === 'live_name');
 	if (isOwner() && m.status && (nameRule || m.liveName))
 		await stage('name', m, () => keepName(env, m, client, nameRule, started, period));
+	// An Infection rule's Unlock teams: the game's team lock switched off while it is on, and what it
+	// found put back once it is off. A server's rows are read once for a hold a switched-off rule left.
+	const unlockRule = rows.find(wantsUnlock);
+	if (isOwner() && m.status && (unlockRule || m.teamUnlock || !m.teamUnlockRead))
+		await stage('team lock', m, () => keepTeamUnlock(env, m, client, unlockRule, started, period));
 	if (diff.joined.length && steamEnabled(env))
 		void getProfiles(
 			env,

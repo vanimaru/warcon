@@ -16,6 +16,9 @@ import { validateLiveName } from './live-name';
 import { validateRestartSkip, type RestartSkipConfig } from './restart-skip';
 import { validateWeatherCycle, type WeatherCycleConfig } from './weather-cycle';
 import { validateDeathWhisper, type DeathWhisperConfig } from './death-whisper';
+import { validateInfection, type InfectionConfig } from './infection';
+import { validateKillRace, type KillRaceConfig } from './kill-race';
+import { validateEconomicWar, type EconomicWarConfig } from './economic-war';
 import { steamIdList } from './steam';
 import type { LiveNameConfig } from '$lib/live-name';
 import { causeTags } from './cause-tags';
@@ -50,7 +53,10 @@ export const TRIGGER_KINDS: TriggerKind[] = [
 	'restart_skip',
 	'afk_watch',
 	'weather_cycle',
-	'death_whisper'
+	'death_whisper',
+	'infection',
+	'kill_race',
+	'economic_war'
 ];
 export const TRIGGER_LABELS: Record<TriggerKind, string> = {
 	welcome: 'Welcome whisper',
@@ -75,7 +81,10 @@ export const TRIGGER_LABELS: Record<TriggerKind, string> = {
 	restart_skip: 'Skip map after restart',
 	afk_watch: 'AFK watch',
 	weather_cycle: 'Weather cycle',
-	death_whisper: 'Death whisper'
+	death_whisper: 'Death whisper',
+	infection: 'Infection',
+	kill_race: 'Kill race',
+	economic_war: 'Economic War'
 };
 
 export interface WelcomeConfig {
@@ -245,7 +254,10 @@ export type TriggerConfig =
 	| RestartSkipConfig
 	| AfkWatchConfig
 	| WeatherCycleConfig
-	| DeathWhisperConfig;
+	| DeathWhisperConfig
+	| InfectionConfig
+	| KillRaceConfig
+	| EconomicWarConfig;
 
 /** A kick reason: not chat, so not held to the game's chat cap. */
 export const MAX_REASON = 200;
@@ -456,6 +468,12 @@ export function validateConfig(kind: TriggerKind, raw: unknown): TriggerConfig {
 			return validateWeatherCycle(c);
 		case 'death_whisper':
 			return validateDeathWhisper(c);
+		case 'infection':
+			return validateInfection(c);
+		case 'kill_race':
+			return validateKillRace(c);
+		case 'economic_war':
+			return validateEconomicWar(c);
 	}
 }
 

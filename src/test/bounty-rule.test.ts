@@ -191,13 +191,16 @@ describe.skipIf(!hasTestDb)('Bounty rule, live', () => {
 	};
 	const rowsOf = (triggerId: string) =>
 		env.db.select().from(outbox).where(eq(outbox.triggerId, triggerId)).orderBy(outbox.id);
-	const stateOf = async (triggerId: string) =>
-		(
+	/** The row's state, with the first of its open bounties as `open` (one at a time on a run). */
+	const stateOf = async (triggerId: string) => {
+		const state = (
 			await env.db
 				.select({ state: triggers.state })
 				.from(triggers)
 				.where(eq(triggers.id, triggerId))
-		)[0].state as { open: { steamId: string; streak: number; match: string } | null } | null;
+		)[0].state as { bounties?: { steamId: string; streak: number; match: string }[] } | null;
+		return state ? { ...state, open: state.bounties?.[0] ?? null } : null;
+	};
 	const rowOf = async (id: number) =>
 		(await env.db.select().from(outbox).where(eq(outbox.id, id)))[0];
 	/** Runs the delivery loop until the rows are done. */
@@ -277,10 +280,12 @@ describe.skipIf(!hasTestDb)('Bounty rule, live', () => {
 		const view = await api(w, 'owner', 'GET api/servers/[id]/triggers', {
 			params: { id: w.server.id }
 		});
-		const listedRule = (view.body as { triggers: { id: string; bounty: unknown }[] }).triggers.find(
-			(t) => t.id === id
-		);
-		expect(listedRule?.bounty).toMatchObject({ steamId: A, name: 'p901', streak: 3 });
+		const listedRule = (
+			view.body as { triggers: { id: string; bounties: unknown[] }[] }
+		).triggers.find((t) => t.id === id);
+		expect(listedRule?.bounties).toMatchObject([
+			{ steamId: A, name: 'p901', streak: 3, how: 'streak' }
+		]);
 		// an enemy's kill claims it
 		await post(w.server.id, [ev(B, A)]);
 		const rows = await rowsOf(id);
