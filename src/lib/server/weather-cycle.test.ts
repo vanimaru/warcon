@@ -11,7 +11,9 @@ import {
 	validateWeatherCycle,
 	WEATHER_CYCLE,
 	weatherCycleIndex,
-	weatherCycleSettingsKey
+	weatherCycleSettingsKey,
+	weatherStep,
+	type WeatherLook
 } from './weather-cycle';
 import { evaluateTriggers, SETTINGS_KEYS, validateConfig, type TickContext } from './triggers';
 import type { TriggerRow } from './db/schema';
@@ -37,6 +39,11 @@ describe('settings', () => {
 		expect(validateWeatherCycle({ lightings: THREE })).toEqual({
 			lightings: THREE,
 			everyMinutes: 30,
+			everyChance: 100,
+			scoreSteps: [],
+			scoreChance: 50,
+			matchMinutes: [],
+			minutesChance: 50,
 			random: false,
 			minPlayers: 1
 		});
@@ -64,10 +71,13 @@ describe('settings', () => {
 		);
 		expect(refused({ lightings: ['DayClear', ''] })).toContain('is not a lighting');
 		expect(refused({ lightings: ['DayClear', 'x'.repeat(101)] })).toContain('is not a lighting');
-		for (const everyMinutes of [0, 4, 1441, -30])
+		for (const everyMinutes of [4, 1441, -30])
 			expect(refused({ lightings: THREE, everyMinutes })).toBe(
-				'Change the weather every 5 to 1440 minutes.'
+				'Change the weather every 5 to 1440 minutes (0: never).'
 			);
+		expect(refused({ lightings: THREE, everyMinutes: 0 })).toContain(
+			'With no scores or minutes into a match'
+		);
 	});
 
 	test('random only when asked; the player count held to 0-1000', () => {
@@ -79,6 +89,27 @@ describe('settings', () => {
 		expect(c({ minPlayers: 5000 }).minPlayers).toBe(1000);
 		expect(c({ everyMinutes: 5 }).everyMinutes).toBe(5);
 		expect(c({ everyMinutes: '15' }).everyMinutes).toBe(15);
+	});
+
+	test('chances, scores and minutes: held to their ranges, each once, lowest first', () => {
+		const c = validateWeatherCycle({
+			lightings: THREE,
+			everyMinutes: 0,
+			everyChance: 150,
+			scoreSteps: [75, 25, 25, 0, 50, 20000],
+			scoreChance: -5,
+			matchMinutes: ['10', 5, 700],
+			minutesChance: 30
+		});
+		expect(c.everyMinutes).toBe(0);
+		expect(c.everyChance).toBe(100);
+		expect(c.scoreSteps).toEqual([25, 50, 75, 10000]);
+		expect(c.scoreChance).toBe(0);
+		expect(c.matchMinutes).toEqual([5, 10, 600]);
+		expect(c.minutesChance).toBe(30);
+		expect(
+			refused({ lightings: THREE, scoreSteps: Array.from({ length: 21 }, (_, i) => i + 1) })
+		).toBe('At most 20 scores.');
 	});
 
 	test('a queued change carries the settings it was decided under', () => {
@@ -198,7 +229,7 @@ describe('at the look', () => {
 				id: 'rule-1',
 				lastFiredAt: new Date(NOW),
 				lastResult: 'Changing to Day Late Rain',
-				state: { index: 1 }
+				state: { index: 1, rolledAt: NOW }
 			}
 		]);
 		// the row moved on with the decision: the looks before the half hour queue nothing
@@ -212,7 +243,7 @@ describe('at the look', () => {
 		expect(out.intents.map((i) => i.params.lighting)).toEqual(['DayLateGray']);
 		out = await look(row, NOW + 60 * MIN, { lighting: 'DayLateGray' });
 		expect(out.intents.map((i) => i.params.lighting)).toEqual(['DayClear']);
-		expect(row.state).toEqual({ index: 0 });
+		expect(row.state).toEqual({ index: 0, rolledAt: NOW + 60 * MIN });
 	});
 
 	test('nothing below its player count; a rule for 0 changes an empty server too', async () => {
@@ -226,7 +257,7 @@ describe('at the look', () => {
 	test('a new map on a lighting of the list: the change passes over it', async () => {
 		const row = rule();
 		await look(row, NOW, { lighting: 'DayEndClear' });
-		expect(row.state).toEqual({ index: 0 });
+		expect(row.state).toEqual({ index: 0, rolledAt: NOW });
 		// the next map came up on rain, the next in the list
 		const out = await look(row, NOW + 30 * MIN, { lighting: 'DayLateRain' });
 		expect(out.intents.map((i) => i.params.lighting)).toEqual(['DayLateGray']);
@@ -239,6 +270,158 @@ describe('at the look', () => {
 			const out = await look(row, NOW + i * MIN, { lighting: 'DayLateGray' });
 			expect(['DayClear', 'DayLateRain']).toContain(out.intents[0].params.lighting as string);
 		}
+	});
+});
+
+describe('weatherStep: the dice', () => {
+	const cfg = (more: Record<string, unknown>) =>
+		validateWeatherCycle({ lightings: THREE, ...more });
+	const at = (more: Partial<WeatherLook> = {}): WeatherLook => ({
+		now: NOW,
+		lead: 0,
+		map: 'Kavkazi',
+		matchEnded: false,
+		matchSeconds: null,
+		lastFiredAt: null,
+		players: 12,
+		...more
+	});
+	const yes = () => 0;
+	const no = () => 0.9999;
+
+	test('the clock rolls at its chance, and waits its minutes whether or not it came up', () => {
+		const c = cfg({ everyChance: 40 });
+		let s = weatherStep(c, null, at(), no);
+		expect(s.rolls).toEqual([{ why: 'every', at: 0, chance: 40, hit: false }]);
+		expect(s.change).toBe(false);
+		expect(s.state.rolledAt).toBe(NOW);
+		expect(weatherStep(c, s.state, at({ now: NOW + 29 * MIN }), yes).dirty).toBe(false);
+		s = weatherStep(c, s.state, at({ now: NOW + 30 * MIN }), () => 0.39);
+		expect(s.change).toBe(true);
+		// 0% never, 100% always, whatever the dice
+		expect(weatherStep(cfg({ everyChance: 0 }), null, at(), yes).change).toBe(false);
+		expect(weatherStep(cfg({ everyChance: 100 }), null, at(), no).change).toBe(true);
+	});
+
+	test('a row from before the chances times the clock from its last change', () => {
+		const c = cfg({});
+		expect(weatherStep(c, { index: 1 }, at({ lastFiredAt: NOW - 10 * MIN }), yes).dirty).toBe(
+			false
+		);
+		expect(weatherStep(c, { index: 1 }, at({ lastFiredAt: NOW - 30 * MIN }), yes).change).toBe(
+			true
+		);
+	});
+
+	test('each score once a match as the side ahead reaches it, the highest of several', () => {
+		const c = cfg({ everyMinutes: 0, scoreSteps: [25, 50, 75], scoreChance: 60 });
+		// a match seen starting
+		let s = weatherStep(c, null, at({ matchEnded: true }), yes);
+		expect(s.rolls).toEqual([]);
+		expect(s.state.match).toEqual({ map: 'Kavkazi', from: NOW, scores: [], minutes: [] });
+		s = weatherStep(c, s.state, at({ now: NOW + 2 * MIN, lead: 24 }), yes);
+		expect(s.dirty).toBe(false);
+		s = weatherStep(c, s.state, at({ now: NOW + 3 * MIN, lead: 25 }), no);
+		expect(s.rolls).toEqual([{ why: 'score', at: 25, chance: 60, hit: false }]);
+		expect(s.change).toBe(false);
+		s = weatherStep(c, s.state, at({ now: NOW + 9 * MIN, lead: 80 }), yes);
+		expect(s.rolls).toEqual([{ why: 'score', at: 75, chance: 60, hit: true }]);
+		expect(s.change).toBe(true);
+		expect(s.state.match?.scores).toEqual([25, 50, 75]);
+		expect(weatherStep(c, s.state, at({ now: NOW + 10 * MIN, lead: 90 }), yes).dirty).toBe(false);
+	});
+
+	test('the scores starting again, or another map, is another match', () => {
+		const c = cfg({ everyMinutes: 0, scoreSteps: [25, 50] });
+		let s = weatherStep(c, null, at({ matchEnded: true }), yes);
+		s = weatherStep(c, s.state, at({ lead: 60 }), yes);
+		expect(s.state.match?.scores).toEqual([25, 50]);
+		// the end unseen: the side ahead is below a score already rolled
+		s = weatherStep(c, s.state, at({ now: NOW + 20 * MIN, lead: 3 }), yes);
+		expect(s.rolls).toEqual([]);
+		expect(s.state.match?.scores).toEqual([]);
+		s = weatherStep(c, s.state, at({ now: NOW + 25 * MIN, lead: 30 }), yes);
+		expect(s.rolls.map((r) => r.at)).toEqual([25]);
+		s = weatherStep(c, s.state, at({ now: NOW + 26 * MIN, lead: 30, map: 'Ozeti' }), yes);
+		expect(s.state.match).toMatchObject({ map: 'Ozeti', scores: [25] });
+		expect(s.rolls).toEqual([]);
+	});
+
+	test('minutes into the match, from the end seen or the game clock; midway, the past is passed', () => {
+		const c = cfg({ everyMinutes: 0, matchMinutes: [5, 10, 20], minutesChance: 100 });
+		let s = weatherStep(c, null, at({ matchEnded: true }), no);
+		s = weatherStep(c, s.state, at({ now: NOW + 4 * MIN }), no);
+		expect(s.dirty).toBe(false);
+		s = weatherStep(c, s.state, at({ now: NOW + 5 * MIN }), no);
+		expect(s.rolls).toEqual([{ why: 'minutes', at: 5, chance: 100, hit: true }]);
+		// the rule came in midway, 12 minutes in by the game's clock: 5 and 10 are passed
+		s = weatherStep(c, null, at({ matchSeconds: 12 * 60 }), no);
+		expect(s.rolls).toEqual([]);
+		expect(s.state.match).toMatchObject({ from: NOW - 12 * MIN, minutes: [5, 10] });
+		s = weatherStep(c, s.state, at({ now: NOW + 8 * MIN }), no);
+		expect(s.rolls.map((r) => r.at)).toEqual([20]);
+	});
+
+	test('below the player count: nothing rolled, the moments passed marked', () => {
+		const c = cfg({ scoreSteps: [25], minPlayers: 10 });
+		let s = weatherStep(c, null, at({ matchEnded: true, players: 4 }), yes);
+		s = weatherStep(c, s.state, at({ now: NOW + MIN, lead: 30, players: 4 }), yes);
+		expect(s.rolls).toEqual([]);
+		expect(s.state.match?.scores).toEqual([25]);
+		expect(s.state.rolledAt).toBeUndefined();
+	});
+
+	test('a score or a minute too soon after a change does not change it again', () => {
+		const c = cfg({ everyMinutes: 0, scoreSteps: [25] });
+		let s = weatherStep(c, null, at({ matchEnded: true }), yes);
+		s = weatherStep(c, s.state, at({ now: NOW + MIN, lead: 25, lastFiredAt: NOW + 30_000 }), yes);
+		expect(s.rolls[0].hit).toBe(true);
+		expect(s.change).toBe(false);
+	});
+});
+
+describe('at the look: scores', () => {
+	test('a score reached changes the weather, said with its chance', async () => {
+		const row = {
+			id: 'rule-2',
+			serverId: 'server-1',
+			orgId: 'org-1',
+			kind: 'weather_cycle',
+			name: 'Weather',
+			enabled: true,
+			config: validateWeatherCycle({
+				lightings: THREE,
+				everyMinutes: 0,
+				scoreSteps: [50],
+				scoreChance: 100
+			}),
+			state: { match: { map: 'Kavkazi', from: NOW - 10 * MIN, scores: [], minutes: [] } },
+			lastFiredAt: null,
+			lastResult: ''
+		} as unknown as TriggerRow;
+		const out = await evaluateTriggers(
+			{} as Env,
+			{
+				server: { id: 'server-1', name: 'Test' },
+				status: {
+					map: 'Kavkazi',
+					experiences: [],
+					lighting: 'DayClear',
+					alternator: '',
+					playerCount: 12,
+					scores: [
+						{ name: 'Valkyra', colorHex: '', score: 52 },
+						{ name: 'Lonestar', colorHex: '', score: 40 }
+					]
+				},
+				players: [],
+				ts: new Date(NOW)
+			} as unknown as TickContext,
+			[row]
+		);
+		expect(out.intents.map((i) => i.params.lighting)).toEqual(['DayLateRain']);
+		expect(out.intents[0].detail).toMatchObject({ why: 'score', at: 50, chance: 100 });
+		expect(out.updates[0].lastResult).toBe('Changing to Day Late Rain (score 50, 100%)');
 	});
 });
 

@@ -640,6 +640,13 @@
 		lightOrder: string[];
 		lightOn: string[];
 		random: boolean;
+		/** a Weather cycle rule's chance on the clock, its scores and minutes into a match, and
+		 *  theirs */
+		everyChance: number;
+		scoreSteps: string;
+		scoreChance: number;
+		matchMinutes: string;
+		minutesChance: number;
 		/** an Infection rule's sides, first infected, texts and end */
 		infectedFaction: string;
 		survivorFaction: string;
@@ -1018,6 +1025,11 @@
 			),
 			lightOn: Array.isArray(c.lightings) ? [...(c.lightings as string[])] : weatherPicks(),
 			random: b('random', false),
+			everyChance: n('everyChance', 100),
+			scoreSteps: Array.isArray(c.scoreSteps) ? (c.scoreSteps as number[]).join(', ') : '',
+			scoreChance: n('scoreChance', 50),
+			matchMinutes: Array.isArray(c.matchMinutes) ? (c.matchMinutes as number[]).join(', ') : '',
+			minutesChance: n('minutesChance', 50),
 			infectedFaction: s('infectedFaction', 'Manticore'),
 			// a new rule's survivors keep the side they picked, on either other faction
 			survivorFaction: s('survivorFaction', ''),
@@ -1347,7 +1359,18 @@
 			case 'weather_cycle':
 				return {
 					lightings: f.lightOrder.filter((l) => f.lightOn.includes(l)),
-					everyMinutes: Number(f.everyMinutes),
+					everyMinutes: Number(f.everyMinutes) || 0,
+					everyChance: Number(f.everyChance),
+					scoreSteps: f.scoreSteps
+						.split(/[\s,]+/)
+						.filter(Boolean)
+						.map(Number),
+					scoreChance: Number(f.scoreChance),
+					matchMinutes: f.matchMinutes
+						.split(/[\s,]+/)
+						.filter(Boolean)
+						.map(Number),
+					minutesChance: Number(f.minutesChance),
 					random: f.random,
 					minPlayers: Number(f.minPlayers)
 				};
@@ -1672,7 +1695,18 @@
 						: c.random
 							? `${ls.map((l) => lightingLabel(data.catalog, l)).join(', ')} at random`
 							: ls.map((l) => lightingLabel(data.catalog, l)).join(' → ');
-				return `${which} · every ${c.everyMinutes} min · at least ${c.minPlayers} on`;
+				const pct = (n: unknown) => (Number(n) < 100 ? ` (${n}%)` : '');
+				const scores = Array.isArray(c.scoreSteps) ? (c.scoreSteps as number[]) : [];
+				const minutes = Array.isArray(c.matchMinutes) ? (c.matchMinutes as number[]) : [];
+				return [
+					which,
+					Number(c.everyMinutes) > 0 ? `every ${c.everyMinutes} min${pct(c.everyChance ?? 100)}` : '',
+					scores.length ? `at scores ${scores.join(', ')}${pct(c.scoreChance)}` : '',
+					minutes.length ? `at ${minutes.join(', ')} min in${pct(c.minutesChance)}` : '',
+					`at least ${c.minPlayers} on`
+				]
+					.filter(Boolean)
+					.join(' · ');
 			}
 		}
 	}
@@ -2374,19 +2408,73 @@
 						>
 					</fieldset>
 					<fieldset class="space-y-2">
-						<legend class="field-label">When</legend>
+						<legend class="field-label">When (each a roll of the dice)</legend>
 						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
 							Every
 							<input
 								class="input w-20 text-right"
 								type="number"
-								min="5"
+								min="0"
 								max="1440"
 								bind:value={f.everyMinutes}
-								aria-label="Every, minutes"
+								aria-label="Every, minutes (0 for never)"
 								required
 							/>
-							min, with at least
+							min (0: never), a
+							<input
+								class="input w-20 text-right"
+								type="number"
+								min="0"
+								max="100"
+								bind:value={f.everyChance}
+								aria-label="Chance on the clock, percent"
+							/>
+							% chance
+						</div>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							As the side ahead reaches the scores
+							<input
+								class="input w-40"
+								type="text"
+								data-plain
+								bind:value={f.scoreSteps}
+								placeholder="25, 50, 75"
+								aria-label="Scores of the side ahead"
+							/>
+							, a
+							<input
+								class="input w-20 text-right"
+								type="number"
+								min="0"
+								max="100"
+								bind:value={f.scoreChance}
+								aria-label="Chance at each score, percent"
+							/>
+							% chance at each
+						</div>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							At
+							<input
+								class="input w-40"
+								type="text"
+								data-plain
+								bind:value={f.matchMinutes}
+								placeholder="10, 20"
+								aria-label="Minutes into the match"
+							/>
+							min into the match, a
+							<input
+								class="input w-20 text-right"
+								type="number"
+								min="0"
+								max="100"
+								bind:value={f.minutesChance}
+								aria-label="Chance at each minute, percent"
+							/>
+							% chance at each
+						</div>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							Only with at least
 							<input
 								class="input w-20 text-right"
 								type="number"
@@ -2397,10 +2485,17 @@
 							/>
 							players on
 						</div>
+						<p class="text-[12px] text-mist-600">
+							Each moment rolls the dice once: 100% always changes, 0% never. Scores and minutes are
+							each rolled once a match (several passed at once roll once); leave them empty to use
+							the clock alone. A score or minute that comes up within a minute of a change is passed
+							over. Minutes count from the match's start as the panel saw it; for a match it came
+							into midway, from the game's clock when it sends one, else from then.
+						</p>
 					</fieldset>
 					<p class="note">
 						Changes the time of day and weather of the match being played, with no map change or
-						restart; the first change comes at once. The next map comes up on its rotation entry's
+						restart; the clock's first roll comes at once. The next map comes up on its rotation entry's
 						own lighting, and the rule changes that at its next turn. A change in order passes over
 						the lighting already on. Every change is under Recent actions and in the audit trail;
 						Discord hears only of the ones that fail. One rule per server.

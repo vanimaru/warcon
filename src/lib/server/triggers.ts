@@ -25,8 +25,8 @@
 //                spares the seeders (afk-protection.ts)
 //   afk_watch    warn, then kick or flag, a player with no kill, death or cash earned for too long
 //                in a live match (afk-watch.ts)
-//   weather_cycle  change the time of day and weather every few minutes, in the match being played
-//                (weather-cycle.ts)
+//   weather_cycle  change the time of day and weather in the match being played: every few minutes,
+//                at scores and at minutes into a match, each with a chance (weather-cycle.ts)
 //   infection    a game mode: a few players start each round infected, and a survivor they kill
 //                joins them (infection.ts; the infections are acted on in feed-events.ts)
 //   kill_race    a team deathmatch: the first side to a number of kills wins and the match is
@@ -235,6 +235,9 @@ import {
 import {
 	lightingName,
 	nextLighting,
+	rollWords,
+	weatherStep,
+	type WeatherState,
 	WEATHER_CYCLE,
 	weatherCycleIndex,
 	weatherCycleSettingsKey,
@@ -1785,36 +1788,75 @@ function evalRotationShuffle(
 }
 
 /**
- * Every `everyMinutes` while the rule's players are on, one change of the weather (weather-cycle.ts).
- * The row moves on at the decision, as a broadcast's does, so the cadence holds whatever delivery
- * makes of it.
+ * A Weather cycle rule at one look (weather-cycle.ts): the dice rolled for what came due (the clock,
+ * a score the side ahead reached, a minute into the match), and one change of the weather when any
+ * came up. The rule's state moves with every roll, so each is rolled once.
  */
 function evalWeatherCycle(
 	ctx: TickContext,
 	row: TriggerRow,
 	cfg: WeatherCycleConfig,
-	out: Evaluation
+	out: Evaluation,
+	rand: () => number = Math.random
 ) {
-	if (ctx.status.playerCount < cfg.minPlayers) return;
-	if (row.lastFiredAt && ctx.ts.getTime() - row.lastFiredAt.getTime() < cfg.everyMinutes * 60_000)
-		return;
-	const next = nextLighting(cfg, weatherCycleIndex(row.state), ctx.status.lighting);
-	if (!next) return;
-	const name = lightingName(next.lighting);
-	out.intents.push({
-		trigger: row,
-		action: WEATHER_CYCLE,
-		params: { rule: weatherCycleSettingsKey(cfg), lighting: next.lighting },
-		target: name,
-		okMessage: `Changed the weather to ${name}.`,
-		detail: { lighting: next.lighting, from: ctx.status.lighting },
-		steamId: null,
-		dedupeKey: key(row, ctx.ts.getTime())
-	});
-	const state = { index: next.index };
-	row.lastFiredAt = ctx.ts;
+	const now = ctx.ts.getTime();
+	const step = weatherStep(
+		cfg,
+		row.state,
+		{
+			now,
+			lead: Math.max(0, ...(ctx.status.scores ?? []).map((f) => Number(f.score) || 0)),
+			map: ctx.status.map,
+			matchEnded: !!ctx.matchEnd,
+			matchSeconds: ctx.status.matchSeconds ?? null,
+			lastFiredAt: row.lastFiredAt ? row.lastFiredAt.getTime() : null,
+			players: ctx.status.playerCount
+		},
+		rand
+	);
+	if (!step.dirty) return;
+	let state: WeatherState = step.state;
+	let lastResult: string | undefined;
+	let fired = false;
+	const hit = step.rolls.find((r) => r.hit);
+	if (step.change && hit) {
+		const next = nextLighting(cfg, weatherCycleIndex(state), ctx.status.lighting);
+		if (next) {
+			const name = lightingName(next.lighting);
+			const why = hit.why === 'every' ? '' : ` (${rollWords(hit)}, ${hit.chance}%)`;
+			out.intents.push({
+				trigger: row,
+				action: WEATHER_CYCLE,
+				params: { rule: weatherCycleSettingsKey(cfg), lighting: next.lighting },
+				target: name,
+				okMessage: `Changed the weather to ${name}.`,
+				detail: {
+					lighting: next.lighting,
+					from: ctx.status.lighting,
+					why: hit.why,
+					at: hit.at,
+					chance: hit.chance
+				},
+				steamId: null,
+				dedupeKey: key(row, now)
+			});
+			state = { ...state, index: next.index };
+			fired = true;
+			lastResult = `Changing to ${name}${why}`;
+		}
+	}
+	if (!fired && step.rolls.length)
+		lastResult = `Kept the weather: ${step.rolls
+			.map((r) => `${rollWords(r)} ${r.hit ? 'came up' : 'missed'} at ${r.chance}%`)
+			.join(', ')}`;
 	row.state = state;
-	out.updates.push({ id: row.id, lastFiredAt: ctx.ts, lastResult: `Changing to ${name}`, state });
+	if (fired) row.lastFiredAt = ctx.ts;
+	out.updates.push({
+		id: row.id,
+		...(fired ? { lastFiredAt: ctx.ts } : {}),
+		...(lastResult ? { lastResult } : {}),
+		state
+	});
 }
 
 /**
@@ -4361,8 +4403,10 @@ export async function dryRun(
 	}
 	if (kind === 'weather_cycle') {
 		const c = cfg as WeatherCycleConfig;
-		let last: Date | null = null;
-		let index = -1;
+		// Every roll replayed as if it came up, so the list shows each moment the dice are rolled,
+		// with its chance; the live rule changes at that share of them.
+		let state: unknown = null;
+		let last: number | null = null;
 		/** what the server would show: the last change, until the samples show another map or lighting */
 		let showing = '';
 		let seen = '';
@@ -4373,23 +4417,42 @@ export async function dryRun(
 				seen = `${r.map}|${lighting}`;
 				showing = lighting;
 			}
-			if ((r.count ?? 0) < c.minPlayers) continue;
-			if (last && r.ts.getTime() - last.getTime() < c.everyMinutes * 60_000) continue;
+			const at = r.ts.getTime();
+			const scores = Array.isArray(r.scores) ? (r.scores as { score?: number }[]) : [];
+			const step = weatherStep(
+				c,
+				state,
+				{
+					now: at,
+					lead: Math.max(0, ...scores.map((f) => Number(f.score) || 0)),
+					map: r.map ?? '',
+					matchEnded: false,
+					matchSeconds: null,
+					lastFiredAt: last,
+					players: r.count ?? 0
+				},
+				() => 0
+			);
+			state = step.state;
+			const hit = step.rolls.find((x) => x.hit);
+			if (!step.change || !hit) continue;
 			const from = showing ? lightingName(showing) : 'the lighting on';
+			const chance = hit.chance < 100 ? `, ${hit.chance}% chance` : '';
+			const why = `${rollWords(hit)}${chance}`;
 			if (c.random) {
-				last = r.ts;
-				push(r.ts, `weather (${r.count} on): ${from} → another at random`);
+				last = at;
+				push(r.ts, `weather (${r.count} on, ${why}): ${from} → another at random`);
 				continue;
 			}
-			const next = nextLighting(c, index, showing);
+			const next = nextLighting(c, weatherCycleIndex(state), showing);
 			if (!next) continue;
-			last = r.ts;
-			index = next.index;
+			last = at;
+			state = { ...(state as WeatherState), index: next.index };
 			showing = next.lighting;
-			push(r.ts, `weather (${r.count} on): ${from} → ${lightingName(next.lighting)}`);
+			push(r.ts, `weather (${r.count} on, ${why}): ${from} → ${lightingName(next.lighting)}`);
 		}
 		result.notes.push(
-			`Times shown are the samples a change fell due at, with at least ${c.minPlayers} on. A new map comes up on its rotation entry's own lighting, which the rule changes at its next turn; a lighting the server does not list is not sent.`
+			`Times shown are the samples a change fell due at, with at least ${c.minPlayers} on.${c.everyChance < 100 || ((c.scoreSteps.length || c.matchMinutes.length) && (c.scoreChance < 100 || c.minutesChance < 100)) ? ' Each is a roll of the dice, shown as if it came up: the live rule changes at the chance shown.' : ''}${c.matchMinutes.length ? ' Minutes into a match are counted from the first sample of each match, so they read late for a match under way as the window opens.' : ''} A new map comes up on its rotation entry's own lighting, which the rule changes at its next turn; a lighting the server does not list is not sent.`
 		);
 		return result;
 	}
