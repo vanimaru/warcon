@@ -266,7 +266,9 @@ describe('at the look', () => {
 	test('at random: never the lighting on', async () => {
 		const row = rule({ lightings: THREE, random: true });
 		for (let i = 0; i < 20; i++) {
+			// a rule that has never changed it: due at once each time
 			row.lastFiredAt = null;
+			row.state = null;
 			const out = await look(row, NOW + i * MIN, { lighting: 'DayLateGray' });
 			expect(['DayClear', 'DayLateRain']).toContain(out.intents[0].params.lighting as string);
 		}
