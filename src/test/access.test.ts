@@ -55,6 +55,16 @@ const SILENT_ECON = {
 	drawMessage: '',
 	timeLeftMessage: ''
 };
+/** A War of Attrition rule that says nothing: it needs only Match control, to end the match. */
+const SILENT_ATTRITION = {
+	limit: 50,
+	startMessage: '',
+	milestoneMessage: '',
+	winMessage: '',
+	timeWinMessage: '',
+	drawMessage: '',
+	timeLeftMessage: ''
+};
 /** An Infection rule that says nothing: it needs only Move. */
 const SILENT_INFECTION = {
 	infectedFaction: 'Manticore',
@@ -574,6 +584,7 @@ describe.skipIf(!hasTestDb)('access', () => {
 				['infection', SILENT_INFECTION, 'players.move'],
 				['kill_race', SILENT_RACE, 'match.control'],
 				['economic_war', SILENT_ECON, 'match.control'],
+				['war_of_attrition', SILENT_ATTRITION, 'match.control'],
 				['afk_protection', {}, 'players.kill'],
 				['afk_watch', {}, 'players.kick'],
 				['afk_watch', { action: 'alert' }, 'players.kick'],
@@ -1458,7 +1469,8 @@ describe.skipIf(!hasTestDb)('access', () => {
 				weather_cycle: { lightings: ['DayClear', 'DayLateRain'] },
 				infection: SILENT_INFECTION,
 				kill_race: SILENT_RACE,
-				economic_war: SILENT_ECON
+				economic_war: SILENT_ECON,
+				war_of_attrition: SILENT_ATTRITION
 			};
 			const save = (kind: string, name: string, config: Record<string, unknown>) =>
 				api(w, 'owner', 'POST api/servers/[id]/triggers', {

@@ -120,6 +120,12 @@ export const RULE_KINDS: { kind: TriggerKind; group: RuleGroup; label: string; b
 		blurb: 'A race to money: the first side to earn an amount of cash wins, and the match is ended.'
 	},
 	{
+		kind: 'war_of_attrition',
+		group: 'In play',
+		label: 'War of Attrition',
+		blurb: 'Lives for each side: the first side to lose them all loses, and the match is ended.'
+	},
+	{
 		kind: 'seed_reward',
 		group: 'Seeding and rewards',
 		label: 'Seeding reward',
@@ -199,7 +205,8 @@ export const ONE_PER_SERVER: TriggerKind[] = [
 	'weather_cycle',
 	'infection',
 	'kill_race',
-	'economic_war'
+	'economic_war',
+	'war_of_attrition'
 ];
 
 /**
@@ -237,7 +244,8 @@ export const FEED_KINDS: TriggerKind[] = [
 	'kill_distance',
 	'bounty',
 	'infection',
-	'kill_race'
+	'kill_race',
+	'war_of_attrition'
 ];
 
 /**

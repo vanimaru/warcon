@@ -172,6 +172,7 @@ const ACTION_TITLES: Record<string, string> = {
 	'trigger.infection': 'Trigger · infection',
 	'trigger.kill_race': 'Trigger · kill race',
 	'trigger.economic_war': 'Trigger · economic war',
+	'trigger.war_of_attrition': 'Trigger · war of attrition',
 	'player.note': 'Player note',
 	'player.watch': 'Watchlist',
 	'list.add': 'Org list · added',

@@ -151,6 +151,22 @@ export const MESSAGE_RULES: Readonly<Partial<Record<TriggerKind, MessageRule>>> 
 		own: ['target', 'standings', 'leader', 'percent', 'winner', 'cash', 'top', 'minutes'],
 		player: false,
 		kept: true
+	},
+	// said to the whole server: `{standings}` is every side's deaths of `{limit}`, `{winner}` and
+	// `{loser}` the sides the war ended for, `{faction}`, `{lost}` and `{percent}` the side that
+	// reached a percentage of the limit
+	war_of_attrition: {
+		fields: [
+			'startMessage',
+			'milestoneMessage',
+			'winMessage',
+			'timeWinMessage',
+			'drawMessage',
+			'timeLeftMessage'
+		],
+		own: ['limit', 'standings', 'winner', 'loser', 'faction', 'lost', 'percent', 'minutes'],
+		player: false,
+		kept: true
 	}
 };
 

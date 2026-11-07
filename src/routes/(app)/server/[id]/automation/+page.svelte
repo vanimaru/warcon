@@ -8,6 +8,7 @@
 	import { INFECTION_DEFAULTS } from '$lib/infection-defaults';
 	import { KILL_RACE_DEFAULTS } from '$lib/kill-race-defaults';
 	import { ECONOMIC_WAR_DEFAULTS } from '$lib/economic-war-defaults';
+	import { WAR_OF_ATTRITION_DEFAULTS } from '$lib/war-of-attrition-defaults';
 	import { fmtCash } from '$lib/cash';
 	import {
 		causeKind,
@@ -291,6 +292,12 @@
 				return canMatch
 					? ''
 					: 'Saving needs the Match control capability as well as Automation: the rule ends the match.';
+			case 'war_of_attrition':
+				return !data.feed
+					? 'Needs the kill feed, which is off on this server. Turn it on under Config.'
+					: !canMatch
+						? 'Saving needs the Match control capability as well as Automation: the rule ends the match.'
+						: '';
 			case 'infection':
 				return !data.feed
 					? 'Needs the kill feed, which is off on this server. Turn it on under Config.'
@@ -427,6 +434,7 @@
 				  ((kind === 'bounty' ||
 					  kind === 'infection' ||
 					  kind === 'kill_race' ||
+					  kind === 'war_of_attrition' ||
 					  kind === 'death_whisper') &&
 					  !data.feed)
 				? 'Needs the kill feed'
@@ -444,7 +452,8 @@
 										  kind === 'restart_skip' ||
 										  kind === 'weather_cycle' ||
 										  kind === 'kill_race' ||
-										  kind === 'economic_war'
+										  kind === 'economic_war' ||
+										  kind === 'war_of_attrition'
 										? 'Needs Match control'
 										: '';
 	/**
@@ -734,6 +743,12 @@
 		/** an Economic War rule's cash to win (its steps, limit and texts are the Kill race's fields),
 		 *  and the seconds a match's start and a late joiner's first moments on a side do not count */
 		econTarget: number;
+		/** a War of Attrition rule's lives, the faction it leaves out, whether a player's own deaths
+		 *  count, and its text when the time runs out */
+		attrLimit: number;
+		leftOut: string;
+		countSelfInflicted: boolean;
+		timeWinMessage: string;
 		/** an Economic War rule's percentages of the target announced, and their text; money spent
 		 *  taken off */
 		milestoneMessage: string;
@@ -770,6 +785,15 @@
 		['timeLeftMessage', 'As the time left falls to each warning'],
 		['winMessage', 'When a side wins'],
 		['drawMessage', 'When the time runs out on a tie']
+	] as const;
+	/** A War of Attrition rule's texts, in the order a match goes, with what each is for. */
+	const ATTRITION_TEXTS = [
+		['startMessage', 'As a match starts'],
+		['milestoneMessage', 'As a side reaches each percentage of the limit'],
+		['timeLeftMessage', 'As the time left falls to each warning'],
+		['winMessage', 'When a side is out of lives'],
+		['timeWinMessage', 'When the time runs out'],
+		['drawMessage', 'When it ends in a tie']
 	] as const;
 	/** WARDOGS' factions, offered for Team balance; a name the game adds later can still be typed. */
 	const FACTIONS = ['Lonestar', 'Valkyra', 'Manticore'];
@@ -985,7 +1009,9 @@
 						? KILL_RACE_DEFAULTS.startMessage
 						: kind === 'economic_war'
 							? ECONOMIC_WAR_DEFAULTS.startMessage
-							: 'New match on {map}. Good luck!'
+							: kind === 'war_of_attrition'
+								? WAR_OF_ATTRITION_DEFAULTS.startMessage
+								: 'New match on {map}. Good luck!'
 			),
 			warnAt: n('warnAt', 2),
 			warnMessage: s(
@@ -1097,7 +1123,9 @@
 				? (c.milestones as number[]).join(', ')
 				: kind === 'economic_war'
 					? '25, 50, 75, 90, 95'
-					: '25, 10, 5',
+					: kind === 'war_of_attrition'
+						? '50, 75, 90'
+						: '25, 10, 5',
 			patientWhisper: s('patientWhisper', INFECTION_DEFAULTS.patientWhisper),
 			// a new rule respawns its first infected on their new side
 			respawnPatients: b('respawnPatients', !t && kind === 'infection'),
@@ -1122,17 +1150,35 @@
 					? KILL_RACE_DEFAULTS.timeLeftMessage
 					: kind === 'economic_war'
 						? ECONOMIC_WAR_DEFAULTS.timeLeftMessage
-						: INFECTION_DEFAULTS.timeLeftMessage
+						: kind === 'war_of_attrition'
+							? WAR_OF_ATTRITION_DEFAULTS.timeLeftMessage
+							: INFECTION_DEFAULTS.timeLeftMessage
 			),
 			raceTarget: n('target', 100),
 			headshotsOnly: b('headshotsOnly', false),
 			teamKillsSubtract: b('teamKillsSubtract', false),
 			announceEvery: n('announceEvery', kind === 'economic_war' ? 0 : 25),
 			progressMessage: s('progressMessage', raceTexts.progressMessage),
-			milestoneMessage: s('milestoneMessage', ECONOMIC_WAR_DEFAULTS.milestoneMessage),
+			milestoneMessage: s(
+				'milestoneMessage',
+				kind === 'war_of_attrition'
+					? WAR_OF_ATTRITION_DEFAULTS.milestoneMessage
+					: ECONOMIC_WAR_DEFAULTS.milestoneMessage
+			),
 			spendingCounts: b('spendingCounts', false),
-			winMessage: s('winMessage', raceTexts.winMessage),
-			drawMessage: s('drawMessage', raceTexts.drawMessage),
+			winMessage: s(
+				'winMessage',
+				kind === 'war_of_attrition' ? WAR_OF_ATTRITION_DEFAULTS.winMessage : raceTexts.winMessage
+			),
+			drawMessage: s(
+				'drawMessage',
+				kind === 'war_of_attrition' ? WAR_OF_ATTRITION_DEFAULTS.drawMessage : raceTexts.drawMessage
+			),
+			attrLimit: n('limit', 100),
+			// a new rule plays two sides, the third faction left out (closed by Team balance)
+			leftOut: s('leftOut', t ? '' : (FACTIONS.at(-1) ?? '')),
+			countSelfInflicted: b('countSelfInflicted', false),
+			timeWinMessage: s('timeWinMessage', WAR_OF_ATTRITION_DEFAULTS.timeWinMessage),
 			econTarget: n('target', 30000),
 			matchGraceSeconds: n('matchGraceSeconds', 30),
 			joinGraceSeconds: n('joinGraceSeconds', 30)
@@ -1366,6 +1412,27 @@
 					startMessage: f.startMessage,
 					progressMessage: f.progressMessage,
 					winMessage: f.winMessage,
+					drawMessage: f.drawMessage,
+					timeLeftMessage: f.timeLeftMessage
+				};
+			case 'war_of_attrition':
+				return {
+					limit: Number(f.attrLimit),
+					leftOut: f.leftOut,
+					countSelfInflicted: f.countSelfInflicted,
+					milestones: f.milestones
+						.split(/[\s,]+/)
+						.filter(Boolean)
+						.map(Number),
+					timeLimitMinutes: Number(f.timeLimitMinutes) || 0,
+					timeWarnings: f.timeWarnings
+						.split(/[\s,]+/)
+						.filter(Boolean)
+						.map(Number),
+					startMessage: f.startMessage,
+					milestoneMessage: f.milestoneMessage,
+					winMessage: f.winMessage,
+					timeWinMessage: f.timeWinMessage,
 					drawMessage: f.drawMessage,
 					timeLeftMessage: f.timeLeftMessage
 				};
@@ -1690,6 +1757,15 @@
 						: '',
 					c.teamKillsSubtract ? 'team kills count against' : '',
 					Number(c.announceEvery) > 0 ? `standings every ${c.announceEvery}` : '',
+					Number(c.timeLimitMinutes) > 0 ? `${c.timeLimitMinutes} min limit` : ''
+				]
+					.filter(Boolean)
+					.join(' · ');
+			case 'war_of_attrition':
+				return [
+					`${c.limit} lives a side`,
+					c.leftOut ? `${c.leftOut} left out` : 'every side',
+					c.countSelfInflicted ? 'own deaths count' : '',
 					Number(c.timeLimitMinutes) > 0 ? `${c.timeLimitMinutes} min limit` : ''
 				]
 					.filter(Boolean)
@@ -2113,6 +2189,13 @@
 		{:else if r.kind === 'kill_race'}
 			<span
 				>Replayed the last 24 h on this server: a side would have won <b
+					class={r.fires ? 'text-warn' : 'text-ok'}>{r.fires}</b
+				>
+				match{r.fires === 1 ? '' : 'es'}</span
+			>
+		{:else if r.kind === 'war_of_attrition'}
+			<span
+				>Replayed the last 24 h on this server: a side would have run out of lives in <b
 					class={r.fires ? 'text-warn' : 'text-ok'}>{r.fires}</b
 				>
 				match{r.fires === 1 ? '' : 'es'}</span
@@ -3151,6 +3234,111 @@
 						match. A match the game ends first is told by the cash as it stood. The count is kept
 						across a worker restart in the same match, less the last few seconds. Needs Match
 						control. One rule per server.
+					</p>
+				{:else if f.kind === 'war_of_attrition'}
+					<fieldset class="space-y-2">
+						<legend class="field-label">Lives</legend>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							Each side has
+							<input
+								class="input w-24 text-right"
+								type="number"
+								min="5"
+								max="5000"
+								bind:value={f.attrLimit}
+								aria-label="Lives a side"
+								required
+							/>
+							lives: the first side to lose them all loses, and the match is ended.
+						</div>
+						<div class="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[13px]">
+							<label class="flex items-center gap-2"
+								><input type="radio" name="attr-sides" value="" bind:group={f.leftOut} /> Three sides</label
+							>
+							{#each FACTIONS as x (x)}
+								<label class="flex items-center gap-2"
+									><input type="radio" name="attr-sides" value={x} bind:group={f.leftOut} /> Two sides,
+									{x} left out</label
+								>
+							{/each}
+						</div>
+						<label class="flex items-center gap-2 text-[13px]"
+							><input type="checkbox" bind:checked={f.countSelfInflicted} /> Deaths by a player's own hand
+							or the world count too (a suicide, a fall)</label
+						>
+						<p class="text-[12px] text-mist-600">
+							A life is lost to a kill by the other side; a team kill never counts. With two sides,
+							the faction left out is not counted and cannot win: close it with a Team balance rule,
+							so nobody plays on it. With three, the side with the fewest deaths of the others wins,
+							and a tie between them is a draw. Deaths by a player's own hand include the kills the
+							panel's own rules make to move or reset someone.
+						</p>
+					</fieldset>
+					<fieldset class="space-y-2">
+						<legend class="field-label">Along the way</legend>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							Announce as a side loses
+							<input
+								class="input w-36"
+								type="text"
+								data-plain
+								bind:value={f.milestones}
+								placeholder="50, 75, 90"
+								aria-label="Percentages of the lives to announce"
+							/>
+							% of its lives (each once a match, 1 to 99)
+						</div>
+						<div class="flex flex-wrap items-center gap-x-2 gap-y-1.5 text-[13px]">
+							Time limit
+							<input
+								class="input w-20 text-right"
+								type="number"
+								min="0"
+								max="180"
+								bind:value={f.timeLimitMinutes}
+								aria-label="Time limit, minutes (0 for none)"
+							/>
+							min from the match's start (0: none): the side with the fewest deaths then wins.
+							Announce the time left at
+							<input
+								class="input w-28"
+								type="text"
+								data-plain
+								bind:value={f.timeWarnings}
+								placeholder="5, 1"
+								aria-label="Minutes left to announce"
+							/>
+							min
+						</div>
+					</fieldset>
+					<fieldset class="space-y-3">
+						<legend class="field-label">Messages (each optional)</legend>
+						{#each ATTRITION_TEXTS as [k, title] (k)}
+							<label class="block space-y-1 text-[13px]"
+								><span class="text-mist-400">{title}</span>
+								<input class="input" type="text" bind:value={f[k]} maxlength={MAX_CHAT} /></label
+							>
+						{/each}
+						{@render placeholders('war_of_attrition', [
+							f.startMessage,
+							f.milestoneMessage,
+							f.timeLeftMessage,
+							f.winMessage,
+							f.timeWinMessage,
+							f.drawMessage
+						])}
+						<p class="text-[12px] text-mist-600">
+							{'{standings}'} lists every side's deaths of {'{limit}'}, {'{winner}'} and {'{loser}'}
+							the side that won and the one out of lives, {'{faction}'}, {'{lost}'} and {'{percent}'}
+							the side that reached a percentage and its deaths, and {'{minutes}'} the time left.
+							Empty sends nothing.
+						</p>
+					</fieldset>
+					<p class="note">
+						The game's own scoring still runs: a side that holds the control zone scores, and the
+						first to the cap ends the match, told by the deaths as they stood. The deaths are counted
+						from the kill feed as kills arrive, from what it stored for the match, so a worker
+						restart counts the same. Needs the kill feed and Match control. One rule per server.
 					</p>
 				{:else if f.kind === 'restart_skip'}
 					<div class="space-y-1.5 text-[13px]">

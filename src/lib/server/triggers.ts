@@ -33,6 +33,8 @@
 //                ended (kill-race.ts; counted as kills arrive, in feed-events.ts)
 //   economic_war   a race to money: the first side to earn an amount of cash wins and the match is
 //                ended (economic-war.ts; counted from the player list at each look)
+//   war_of_attrition  lives for each side: the first side to lose them all loses and the match is
+//                ended (war-of-attrition.ts; counted as kills arrive, in feed-events.ts)
 //   death_whisper  whisper a player killed one of the rule's messages while they wait to respawn,
 //                at most once in a cooldown (death-whisper.ts, acted on in feed-events.ts)
 // The worker evaluates them on every observation and writes the actions they want to the outbox
@@ -299,6 +301,17 @@ import {
 } from './economic-war';
 import { fmtCash } from '$lib/cash';
 import {
+	attritionAtMatchEnd,
+	attritionClock,
+	attritionSettingsKey,
+	attritionSpeaks,
+	attritionStandings,
+	keepAttritions,
+	knownAttrition,
+	type AttritionConfig,
+	type AttritionNews
+} from './war-of-attrition';
+import {
 	deathBlanks,
 	deathVars,
 	deathWhisperStep,
@@ -425,6 +438,7 @@ const RULE_NEEDS: Record<
 	infection: ['players.move', 'moves players between teams'],
 	kill_race: ['match.control', 'ends the match'],
 	economic_war: ['match.control', 'ends the match'],
+	war_of_attrition: ['match.control', 'ends the match'],
 	afk_protection: ['players.kill', 'kills players'],
 	name_change: ['players.kick', 'flags or kicks players'],
 	rotation_shuffle: ['config.apply', 'rewrites the rotation in the config document'],
@@ -486,6 +500,8 @@ function ruleAlsoNeeds(kind: TriggerKind, config: unknown): [Capability, string]
 	if (kind === 'infection' && infectionSpeaks(config as Partial<InfectionConfig> | null))
 		return ['chat.send', 'messages players'];
 	if (kind === 'kill_race' && killRaceSpeaks(config as Partial<KillRaceConfig> | null))
+		return ['chat.send', 'messages players'];
+	if (kind === 'war_of_attrition' && attritionSpeaks(config as Partial<AttritionConfig> | null))
 		return ['chat.send', 'messages players'];
 	if (kind === 'economic_war' && economicWarSpeaks(config as Partial<EconomicWarConfig> | null))
 		return ['chat.send', 'messages players'];
@@ -715,7 +731,8 @@ export const SETTINGS_KEYS: Partial<Record<string, (config: unknown) => string>>
 	weather_cycle: (c) => weatherCycleSettingsKey(c as WeatherCycleConfig),
 	infection: (c) => infectionSettingsKey(c as InfectionConfig),
 	kill_race: (c) => killRaceSettingsKey(c as KillRaceConfig),
-	economic_war: (c) => economicWarSettingsKey(c as EconomicWarConfig)
+	economic_war: (c) => economicWarSettingsKey(c as EconomicWarConfig),
+	war_of_attrition: (c) => attritionSettingsKey(c as AttritionConfig)
 };
 
 /**
@@ -981,6 +998,10 @@ export async function evaluateTriggers(
 	const read = statsReader(env, ctx.server.id);
 	keepRaces(ctx.server.id, new Set(rows.filter((r) => r.kind === 'kill_race').map((r) => r.id)));
 	keepEcons(ctx.server.id, new Set(rows.filter((r) => r.kind === 'economic_war').map((r) => r.id)));
+	keepAttritions(
+		ctx.server.id,
+		new Set(rows.filter((r) => r.kind === 'war_of_attrition').map((r) => r.id))
+	);
 	keepInfections(
 		ctx.server.id,
 		new Set(rows.filter((r) => r.kind === 'infection').map((r) => r.id))
@@ -1054,6 +1075,10 @@ export async function evaluateTriggers(
 				case 'kill_race':
 					// Counted as kills arrive (feed-events.ts); a look keeps the clock and the match's end.
 					evalKillRace(ctx, row, row.config as KillRaceConfig, out);
+					break;
+				case 'war_of_attrition':
+					// Counted as kills arrive (feed-events.ts); a look keeps the clock and the match's end.
+					evalAttrition(ctx, row, row.config as AttritionConfig, out);
 					break;
 				case 'economic_war':
 					// Counted from the player list's cash at each look.
@@ -2081,6 +2106,141 @@ export function pushRace(
 				id: row.id,
 				lastFiredAt: new Date(),
 				lastResult: `A draw at ${kills} kills (${table})`.slice(0, 300)
+			});
+		}
+	}
+}
+
+/**
+ * A War of Attrition rule at one look (war-of-attrition.ts): as a match ends, the war as its deaths
+ * stood (when the game's cap came first) and the next match's opening line; between, the time
+ * limit's clock. The deaths themselves are counted as kills arrive (feed-events.ts).
+ */
+function evalAttrition(ctx: TickContext, row: TriggerRow, cfg: AttritionConfig, out: Evaluation) {
+	const mem = knownAttrition(row.id, attritionSettingsKey(cfg));
+	const say = (text: string, own: MessageVars) =>
+		renderTemplate(text, keptVars(vars(ctx, null, {}, own)), MAX_CHAT);
+	if (ctx.matchEnd) {
+		if (mem) pushAttrition(out, row, cfg, mem.match, attritionAtMatchEnd(mem), say);
+		if (cfg.startMessage)
+			out.intents.push({
+				trigger: row,
+				action: 'broadcast',
+				params: {
+					message: say(cfg.startMessage, { limit: cfg.limit }),
+					rule: attritionSettingsKey(cfg)
+				},
+				target: 'start',
+				okMessage: 'Announced the war of attrition.',
+				detail: { stage: 'start', limit: cfg.limit },
+				steamId: null,
+				dedupeKey: key(row, 'start', ctx.ts.getTime())
+			});
+		return;
+	}
+	if (!mem) return;
+	pushAttrition(out, row, cfg, mem.match, attritionClock(cfg, mem, ctx.ts.getTime()), say);
+}
+
+/**
+ * The actions of a War of Attrition rule's news: a side's share of the limit, the time left, and
+ * the result, with the match ended when the war decided it (a side out of lives, or the time up).
+ * Keyed by the match, so a restart that decides it again sends nothing twice.
+ */
+export function pushAttrition(
+	out: Evaluation,
+	row: TriggerRow,
+	cfg: AttritionConfig,
+	match: string,
+	news: AttritionNews[],
+	say: (text: string, own: MessageVars) => string
+): void {
+	const config = attritionSettingsKey(cfg);
+	const broadcast = (text: string, subject: string, detail: Record<string, unknown>, k: string) => {
+		if (!text) return;
+		out.intents.push({
+			trigger: row,
+			action: 'broadcast',
+			params: { message: text, rule: config },
+			target: text,
+			okMessage: `Announced ${subject}.`,
+			detail: { match, ...detail },
+			steamId: null,
+			dedupeKey: key(row, match, k)
+		});
+	};
+	const end = (why: string) =>
+		out.intents.push({
+			trigger: row,
+			action: 'endMatch',
+			params: { rule: config },
+			target: 'match',
+			okMessage: `Ended the match: ${why}.`,
+			detail: { match, stage: 'end' },
+			steamId: null,
+			dedupeKey: key(row, match, 'end')
+		});
+	for (const n of news) {
+		const table = attritionStandings(n.tally, cfg.limit);
+		const own = (extra: MessageVars = {}): MessageVars => ({
+			limit: cfg.limit,
+			standings: table,
+			...extra
+		});
+		if (n.kind === 'milestone') {
+			broadcast(
+				cfg.milestoneMessage &&
+					say(
+						cfg.milestoneMessage,
+						own({ faction: n.faction, lost: n.deaths, percent: n.percent })
+					),
+				`${n.faction} at ${n.percent}% of the limit`,
+				{ stage: 'milestone', faction: n.faction, deaths: n.deaths, percent: n.percent },
+				`pct:${n.percent}`
+			);
+		} else if (n.kind === 'time') {
+			broadcast(
+				cfg.timeLeftMessage && say(cfg.timeLeftMessage, own({ minutes: n.minutes })),
+				`${n.minutes} min left`,
+				{ stage: 'time', minutes: n.minutes },
+				`time:${n.minutes}`
+			);
+		} else if (n.kind === 'win') {
+			const text = n.why === 'limit' ? cfg.winMessage : cfg.timeWinMessage;
+			broadcast(
+				text && say(text, own({ winner: n.winner, loser: n.loser ?? '' })),
+				`${n.winner}'s win`,
+				{ stage: 'win', winner: n.winner, loser: n.loser, why: n.why, standings: table },
+				'result'
+			);
+			if (n.why !== 'match')
+				end(
+					n.why === 'limit'
+						? `${n.loser} lost ${cfg.limit} lives, ${n.winner} wins`
+						: `time is up, ${n.winner} with the fewest deaths`
+				);
+			out.updates.push({
+				id: row.id,
+				lastFiredAt: new Date(),
+				lastResult: `${n.winner} won (${table})`.slice(0, 300)
+			});
+		} else {
+			broadcast(
+				cfg.drawMessage && say(cfg.drawMessage, own({ loser: n.loser ?? '' })),
+				'a draw',
+				{ stage: 'draw', loser: n.loser, why: n.why, standings: table },
+				'result'
+			);
+			if (n.why !== 'match')
+				end(
+					n.why === 'limit'
+						? `${n.loser} lost ${cfg.limit} lives, the others tied`
+						: 'time is up, a draw on deaths'
+				);
+			out.updates.push({
+				id: row.id,
+				lastFiredAt: new Date(),
+				lastResult: `A draw (${table})`.slice(0, 300)
 			});
 		}
 	}
@@ -3397,6 +3557,52 @@ export async function dryRun(
 		result.notes.push(
 			'Faction switches are not kept in the session history, so there is nothing to replay; the rule fires live when a player moves from one faction to another.'
 		);
+		return result;
+	}
+	if (kind === 'war_of_attrition') {
+		const c = cfg as AttritionConfig;
+		const deathRows = await env.db.execute<{
+			match: number | null;
+			faction: string | null;
+			killer: string | null;
+			suicide: boolean;
+			teamKill: boolean;
+			ts: Date;
+		}>(sql`
+			SELECT match_row AS match, victim_faction AS faction, killer_steam_id AS killer, suicide,
+			       team_kill AS "teamKill", ts
+			  FROM kills
+			 WHERE server_id = ${server.id} AND ts >= ${from} AND match_row IS NOT NULL
+			 ORDER BY ts ASC LIMIT ${KILL_RACE_REPLAY_MAX}`);
+		const out = c.leftOut.toLowerCase();
+		const counts = new Map<number, Map<string, number>>();
+		const done = new Set<number>();
+		for (const d of deathRows) {
+			if (d.match === null || !d.faction || done.has(d.match)) continue;
+			if (d.faction.toLowerCase() === out || d.teamKill) continue;
+			// by their own hand or the world, only when the rule counts those
+			if ((d.suicide || !d.killer) && !c.countSelfInflicted) continue;
+			const sides = counts.get(d.match) ?? new Map<string, number>();
+			counts.set(d.match, sides);
+			const n = (sides.get(d.faction) ?? 0) + 1;
+			sides.set(d.faction, n);
+			if (n >= c.limit) {
+				done.add(d.match);
+				const rest = [...sides.entries()].filter(([f]) => f !== d.faction);
+				const best = rest.sort((a, b) => a[1] - b[1])[0];
+				push(
+					new Date(d.ts),
+					`${d.faction} loses ${c.limit} lives: ${best ? `${best[0]} wins` : 'another side wins'}, the match is ended`
+				);
+			}
+		}
+		result.notes.push(
+			`Replayed the deaths the feed stored for ${counts.size} match${counts.size === 1 ? '' : 'es'} in the last 24 hours. A side with no deaths in a match is not seen here, so the winner shown is the side with the fewest of those that died. A time limit is not replayed; a match the game ended first is told by its deaths as they stood.`
+		);
+		if (deathRows.length === KILL_RACE_REPLAY_MAX)
+			result.notes.push(
+				`Only the first ${KILL_RACE_REPLAY_MAX} deaths of the window were replayed.`
+			);
 		return result;
 	}
 	if (kind === 'economic_war') {

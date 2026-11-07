@@ -590,7 +590,8 @@ export type TriggerKind =
 	| 'death_whisper'
 	| 'infection'
 	| 'kill_race'
-	| 'economic_war';
+	| 'economic_war'
+	| 'war_of_attrition';
 
 export interface TriggerView {
 	id: string;

@@ -2,8 +2,8 @@
 // event bus (the SSE route fans them to browsers; in the split roles every web process gets them
 // through the relay stream), and the team-kill rules get their turn. Their intents go through
 // the same outbox as every other trigger, so delivery, audit and the Discord mirror are shared.
-// The Kill rate, Kill distance, Name change, Bounty, Infection, Kill race and Death whisper rules
-// see every batch; the rest of the work is for batches with team kills.
+// The Kill rate, Kill distance, Name change, Bounty, Infection, Kill race, War of Attrition and Death
+// whisper rules see every batch; the rest of the work is for batches with team kills.
 import { and, eq, gte, inArray, isNull, lte, sql } from 'drizzle-orm';
 import { forLog } from './http';
 import type { Env } from './env';
@@ -14,6 +14,7 @@ import {
 	bountyLapse,
 	enabledTriggers,
 	pushInfection,
+	pushAttrition,
 	pushRace,
 	type InfectionSay,
 	killDistanceAct,
@@ -114,6 +115,16 @@ import {
 	type KillerLine,
 	type KillRaceConfig
 } from './kill-race';
+import {
+	attritionMemory,
+	attritionSettingsKey,
+	attritionStep,
+	attritionTally,
+	keepAttritions,
+	syncAttritionClock,
+	type AttritionConfig,
+	type DeathLine
+} from './war-of-attrition';
 import { isDemoServer } from './env';
 import { drainMockFeed } from './mockgame';
 import { ingestBatch } from './feed';
@@ -171,6 +182,12 @@ export async function onKillsIngested(
 	} catch (err) {
 		if (!(err instanceof LostOwnership))
 			console.warn(`[warcon] kill race rules on ${serverId}:`, publicMessage(err));
+	}
+	try {
+		await actOnAttrition(env, serverId, kills, vars);
+	} catch (err) {
+		if (!(err instanceof LostOwnership))
+			console.warn(`[warcon] war of attrition rules on ${serverId}:`, publicMessage(err));
 	}
 	try {
 		await actOnDeathWhisper(env, serverId, kills, vars);
@@ -1280,6 +1297,78 @@ async function actOnKillRace(
 		if (!news.length) continue;
 		const out: Evaluation = { intents: [], updates: [] };
 		pushRace(out, row, cfg, mem.match, news, (text, own) =>
+			renderTemplate(text, keptVars(vars.bare(own)), MAX_CHAT)
+		);
+		let queued = 0;
+		await withOwnedTransaction(env, async (tx) => {
+			queued = await enqueueIntents(tx, serverId, out.intents);
+			await applyTriggerUpdates(tx, out.updates);
+		});
+		if (queued) wakeDelivery();
+	}
+}
+
+/**
+ * Each side's deaths in a match, from what the feed stored for it: deaths at another side's hand,
+ * and those by a player's own hand or the world (a suicide, a fall, a kill of the panel's). Team
+ * kills count for nobody. Read from the match's own rows (kills.match_row), within the match's time
+ * so the server's kill index is used.
+ */
+async function deathLines(env: Env, serverId: string, matchRow: number): Promise<DeathLine[]> {
+	const rows = await env.db.execute<{ faction: string; deaths: number; selfInflicted: number }>(sql`
+		SELECT k.victim_faction AS faction,
+		       COUNT(*) FILTER (WHERE k.killer_steam_id IS NOT NULL AND NOT k.suicide)::int AS deaths,
+		       COUNT(*) FILTER (WHERE k.killer_steam_id IS NULL OR k.suicide)::int AS "selfInflicted"
+		  FROM kills k JOIN matches m ON m.id = ${matchRow} AND m.server_id = ${serverId}
+		 WHERE k.server_id = ${serverId} AND k.match_row = ${matchRow}
+		   AND k.ts >= m.started_at - interval '5 minutes'
+		   AND k.victim_faction IS NOT NULL AND NOT k.team_kill
+		 GROUP BY k.victim_faction`);
+	return rows.map((r) => ({
+		faction: r.faction,
+		deaths: Number(r.deaths),
+		selfInflicted: Number(r.selfInflicted)
+	}));
+}
+
+/**
+ * The War of Attrition rule's count (war-of-attrition.ts): after each batch, every side's deaths in
+ * the match are read again, so a restart counts the same; a side's share of the limit is announced
+ * as it passes each percentage, and a side out of lives loses and the match is ended. A batch with
+ * no match open (a server's first seconds) is passed over.
+ */
+async function actOnAttrition(
+	env: Env,
+	serverId: string,
+	batch: KillView[],
+	vars: KillerVars
+): Promise<void> {
+	const rows = (await enabledTriggers(env, serverId)).filter((r) => r.kind === 'war_of_attrition');
+	keepAttritions(serverId, new Set(rows.map((r) => r.id)));
+	if (!rows.length) return;
+	const matchRow = await stampedMatch(env, serverId, batch);
+	if (matchRow === null) return;
+	const lines = await deathLines(env, serverId, matchRow);
+	const factions = (memoryOf(serverId)?.status?.scores ?? []).map((f) => f.name);
+	const latest = [...batch].sort((a, b) => a.eventTime - b.eventTime).at(-1)!;
+	const now = Date.now();
+	const match = `m${matchRow}`;
+	for (const row of rows) {
+		const cfg = row.config as AttritionConfig;
+		const { mem, fresh } = attritionMemory(
+			serverId,
+			row.id,
+			attritionSettingsKey(cfg),
+			match,
+			now,
+			true
+		);
+		// the game's match clock says when the match began
+		syncAttritionClock(mem, Date.parse(latest.ts), latest.eventTime);
+		const news = attritionStep(cfg, mem, attritionTally(cfg, lines, factions), fresh);
+		if (!news.length) continue;
+		const out: Evaluation = { intents: [], updates: [] };
+		pushAttrition(out, row, cfg, mem.match, news, (text, own) =>
 			renderTemplate(text, keptVars(vars.bare(own)), MAX_CHAT)
 		);
 		let queued = 0;

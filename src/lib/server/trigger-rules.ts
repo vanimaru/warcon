@@ -19,6 +19,7 @@ import { validateDeathWhisper, type DeathWhisperConfig } from './death-whisper';
 import { validateInfection, type InfectionConfig } from './infection';
 import { validateKillRace, type KillRaceConfig } from './kill-race';
 import { validateEconomicWar, type EconomicWarConfig } from './economic-war';
+import { validateAttrition, type AttritionConfig } from './war-of-attrition';
 import { steamIdList } from './steam';
 import type { LiveNameConfig } from '$lib/live-name';
 import { causeTags } from './cause-tags';
@@ -56,7 +57,8 @@ export const TRIGGER_KINDS: TriggerKind[] = [
 	'death_whisper',
 	'infection',
 	'kill_race',
-	'economic_war'
+	'economic_war',
+	'war_of_attrition'
 ];
 export const TRIGGER_LABELS: Record<TriggerKind, string> = {
 	welcome: 'Welcome whisper',
@@ -84,7 +86,8 @@ export const TRIGGER_LABELS: Record<TriggerKind, string> = {
 	death_whisper: 'Death whisper',
 	infection: 'Infection',
 	kill_race: 'Kill race',
-	economic_war: 'Economic War'
+	economic_war: 'Economic War',
+	war_of_attrition: 'War of Attrition'
 };
 
 export interface WelcomeConfig {
@@ -257,7 +260,8 @@ export type TriggerConfig =
 	| DeathWhisperConfig
 	| InfectionConfig
 	| KillRaceConfig
-	| EconomicWarConfig;
+	| EconomicWarConfig
+	| AttritionConfig;
 
 /** A kick reason: not chat, so not held to the game's chat cap. */
 export const MAX_REASON = 200;
@@ -474,6 +478,8 @@ export function validateConfig(kind: TriggerKind, raw: unknown): TriggerConfig {
 			return validateKillRace(c);
 		case 'economic_war':
 			return validateEconomicWar(c);
+		case 'war_of_attrition':
+			return validateAttrition(c);
 	}
 }
 
