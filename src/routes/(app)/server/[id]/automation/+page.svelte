@@ -432,11 +432,11 @@
 				  kind === 'kill_distance' ||
 				  kind === 'name_change' ||
 				  ((kind === 'bounty' ||
-					  kind === 'infection' ||
-					  kind === 'kill_race' ||
-					  kind === 'war_of_attrition' ||
-					  kind === 'death_whisper') &&
-					  !data.feed)
+						kind === 'infection' ||
+						kind === 'kill_race' ||
+						kind === 'war_of_attrition' ||
+						kind === 'death_whisper') &&
+						!data.feed)
 				? 'Needs the kill feed'
 				: kind === 'infection'
 					? 'Needs Move'
@@ -1851,7 +1851,9 @@
 				const minutes = Array.isArray(c.matchMinutes) ? (c.matchMinutes as number[]) : [];
 				return [
 					which,
-					Number(c.everyMinutes) > 0 ? `every ${c.everyMinutes} min${pct(c.everyChance ?? 100)}` : '',
+					Number(c.everyMinutes) > 0
+						? `every ${c.everyMinutes} min${pct(c.everyChance ?? 100)}`
+						: '',
 					scores.length ? `at scores ${scores.join(', ')}${pct(c.scoreChance)}` : '',
 					minutes.length ? `at ${minutes.join(', ')} min in${pct(c.minutesChance)}` : '',
 					`at least ${c.minPlayers} on`
@@ -2720,10 +2722,10 @@
 					</fieldset>
 					<p class="note">
 						Changes the time of day and weather of the match being played, with no map change or
-						restart; the clock's first roll comes at once. The next map comes up on its rotation entry's
-						own lighting, and the rule changes that at its next turn. A change in order passes over
-						the lighting already on. Every change is under Recent actions and in the audit trail;
-						Discord hears only of the ones that fail. One rule per server.
+						restart; the clock's first roll comes at once. The next map comes up on its rotation
+						entry's own lighting, and the rule changes that at its next turn. A change in order
+						passes over the lighting already on. Every change is under Recent actions and in the
+						audit trail; Discord hears only of the ones that fail. One rule per server.
 					</p>
 				{:else if f.kind === 'infection'}
 					<fieldset class="space-y-2 text-[13px]">
@@ -3109,8 +3111,8 @@
 							wins, and the match is ended.
 						</div>
 						<label class="flex items-center gap-2 text-[13px]"
-							><input type="checkbox" bind:checked={f.spendingCounts} /> Money spent counts against
-							the side (a vehicle, a loadout)</label
+							><input type="checkbox" bind:checked={f.spendingCounts} /> Money spent counts against the
+							side (a vehicle, a loadout)</label
 						>
 						<p class="text-[12px] text-mist-600">
 							What counts is the cash each player earns while on a side, added up per side. With
@@ -3219,11 +3221,11 @@
 							f.drawMessage
 						])}
 						<p class="text-[12px] text-mist-600">
-							{'{standings}'} lists what every side has earned, {'{leader}'} and {'{percent}'} the
-							side ahead and the share of the target it reached, {'{winner}'} and {'{cash}'} the side
-							that won and its earnings, {'{top}'} the player who earned the most (after what they
-							spent, when that counts), {'{target}'} the cash to win and {'{minutes}'} the time left.
-							Empty sends nothing.
+							{'{standings}'} lists what every side has earned, {'{leader}'} and {'{percent}'} the side
+							ahead and the share of the target it reached, {'{winner}'} and {'{cash}'} the side that
+							won and its earnings, {'{top}'} the player who earned the most (after what they spent, when
+							that counts), {'{target}'} the cash to win and {'{minutes}'} the time left. Empty sends
+							nothing.
 						</p>
 					</fieldset>
 					<p class="note">
@@ -3261,14 +3263,14 @@
 							{/each}
 						</div>
 						<label class="flex items-center gap-2 text-[13px]"
-							><input type="checkbox" bind:checked={f.countSelfInflicted} /> Deaths by a player's own hand
-							or the world count too (a suicide, a fall)</label
+							><input type="checkbox" bind:checked={f.countSelfInflicted} /> Deaths by a player's own
+							hand or the world count too (a suicide, a fall)</label
 						>
 						<p class="text-[12px] text-mist-600">
-							A life is lost to a kill by the other side; a team kill never counts. The war is fought
-							by two sides: the faction left out is not counted and cannot win, so close it with a
-							Team balance rule and nobody plays on it. Deaths by a player's own hand include the
-							kills the panel's own rules make to move or reset someone.
+							A life is lost to a kill by the other side; a team kill never counts. The war is
+							fought by two sides: the faction left out is not counted and cannot win, so close it
+							with a Team balance rule and nobody plays on it. Deaths by a player's own hand include
+							the kills the panel's own rules make to move or reset someone.
 						</p>
 					</fieldset>
 					<fieldset class="space-y-2">
@@ -3295,8 +3297,8 @@
 								bind:value={f.timeLimitMinutes}
 								aria-label="Time limit, minutes (0 for none)"
 							/>
-							min from the match's start (0: none): the side with the fewest deaths then wins.
-							Announce the time left at
+							min from the match's start (0: none): the side with the fewest deaths then wins. Announce
+							the time left at
 							<input
 								class="input w-28"
 								type="text"
@@ -3327,15 +3329,16 @@
 						<p class="text-[12px] text-mist-600">
 							{'{standings}'} lists every side's deaths of {'{limit}'}, {'{winner}'} and {'{loser}'}
 							the side that won and the one out of lives, {'{faction}'}, {'{lost}'} and {'{percent}'}
-							the side that reached a percentage and its deaths, and {'{minutes}'} the time left.
-							Empty sends nothing.
+							the side that reached a percentage and its deaths, and {'{minutes}'} the time left. Empty
+							sends nothing.
 						</p>
 					</fieldset>
 					<p class="note">
 						The game's own scoring still runs: a side that holds the control zone scores, and the
-						first to the cap ends the match, told by the deaths as they stood. The deaths are counted
-						from the kill feed as kills arrive, from what it stored for the match, so a worker
-						restart counts the same. Needs the kill feed and Match control. One rule per server.
+						first to the cap ends the match, told by the deaths as they stood. The deaths are
+						counted from the kill feed as kills arrive, from what it stored for the match, so a
+						worker restart counts the same. Needs the kill feed and Match control. One rule per
+						server.
 					</p>
 				{:else if f.kind === 'restart_skip'}
 					<div class="space-y-1.5 text-[13px]">
