@@ -24,24 +24,31 @@ const line = (faction: string, deaths: number, selfInflicted = 0): DeathLine => 
 
 describe('War of Attrition settings', () => {
 	test('a limit the panel sets, 100 by default, within bounds', () => {
-		const d = validateAttrition({});
+		const d = validateAttrition({ leftOut: 'Manticore' });
 		expect(d.limit).toBe(100);
-		expect(d.leftOut).toBe('');
+		expect(d.leftOut).toBe('Manticore');
 		expect(d.countSelfInflicted).toBe(false);
 		expect(d.milestones).toEqual([50, 75, 90]);
 		expect(d.timeLimitMinutes).toBe(0);
 		expect(d.timeWarnings).toEqual([5, 1]);
-		expect(() => validateAttrition({ limit: 4 })).toThrow('5 to 5000');
-		expect(() => validateAttrition({ limit: 5001 })).toThrow();
-		expect(validateAttrition({ milestones: [90, 50, 50, 0, 150] }).milestones).toEqual([
-			50, 90, 99
-		]);
+		expect(() => validateAttrition({ limit: 4, leftOut: 'Manticore' })).toThrow('5 to 5000');
+		expect(() => validateAttrition({ limit: 5001, leftOut: 'Manticore' })).toThrow();
+		expect(
+			validateAttrition({ leftOut: 'Manticore', milestones: [90, 50, 50, 0, 150] }).milestones
+		).toEqual([50, 90, 99]);
+	});
+	test('two sides only: a rule that leaves no faction out is refused', () => {
+		for (const leftOut of [undefined, '', '   '])
+			expect(() => validateAttrition({ limit: 50, leftOut })).toThrow(
+				'Name the faction left out: the war is fought by two sides.'
+			);
 	});
 	test('says nothing with every text blank', () => {
 		expect(attritionSpeaks(TWO)).toBe(true);
 		expect(
 			attritionSpeaks(
 				validateAttrition({
+					leftOut: 'Manticore',
 					startMessage: '',
 					milestoneMessage: '',
 					winMessage: '',
@@ -82,24 +89,17 @@ describe('War of Attrition news', () => {
 		]);
 		expect(attritionStep(TWO, m, t)).toEqual([]);
 	});
-	test('with three sides in play, the fewest deaths of the others wins; a tie between them draws', () => {
-		const three = validateAttrition({ limit: 50 });
+	test('the side left out never wins, whatever its deaths', () => {
 		const t = attritionTally(
-			three,
-			[line('Valkyra', 50), line('Lonestar', 20), line('Manticore', 35)],
+			TWO,
+			[line('Valkyra', 50), line('Lonestar', 20), line('Manticore', 0)],
 			FACTIONS
 		);
-		expect(attritionStep(three, mem(), t)[0]).toMatchObject({
+		expect(attritionStep(TWO, mem(), t)[0]).toMatchObject({
 			kind: 'win',
 			winner: 'Lonestar',
 			loser: 'Valkyra'
 		});
-		const tie = attritionTally(
-			three,
-			[line('Valkyra', 50), line('Lonestar', 20), line('Manticore', 20)],
-			FACTIONS
-		);
-		expect(attritionStep(three, mem(), tie)[0]).toMatchObject({ kind: 'draw', loser: 'Valkyra' });
 	});
 	test('each percentage of the limit once, as the side with the most deaths reaches it', () => {
 		const m = mem();

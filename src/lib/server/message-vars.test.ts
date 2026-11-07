@@ -255,7 +255,7 @@ describe('the catalogue and the rules’ settings', () => {
 		infection: { infectedFaction: 'Manticore', survivorFaction: 'Lonestar' },
 		kill_race: { target: 50 },
 		economic_war: { target: 20000 },
-		war_of_attrition: { limit: 50 },
+		war_of_attrition: { limit: 50, leftOut: 'Manticore' },
 		bounty: { reward: 'win', winClaims: 3 }
 	};
 	test('every message field the catalogue names is a text the rule keeps', () => {

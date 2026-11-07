@@ -1176,7 +1176,7 @@
 			),
 			attrLimit: n('limit', 100),
 			// a new rule plays two sides, the third faction left out (closed by Team balance)
-			leftOut: s('leftOut', t ? '' : (FACTIONS.at(-1) ?? '')),
+			leftOut: s('leftOut', '') || (FACTIONS.at(-1) ?? ''),
 			countSelfInflicted: b('countSelfInflicted', false),
 			timeWinMessage: s('timeWinMessage', WAR_OF_ATTRITION_DEFAULTS.timeWinMessage),
 			econTarget: n('target', 30000),
@@ -1764,7 +1764,7 @@
 			case 'war_of_attrition':
 				return [
 					`${c.limit} lives a side`,
-					c.leftOut ? `${c.leftOut} left out` : 'every side',
+					`${c.leftOut} left out`,
 					c.countSelfInflicted ? 'own deaths count' : '',
 					Number(c.timeLimitMinutes) > 0 ? `${c.timeLimitMinutes} min limit` : ''
 				]
@@ -3252,13 +3252,11 @@
 							lives: the first side to lose them all loses, and the match is ended.
 						</div>
 						<div class="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[13px]">
-							<label class="flex items-center gap-2"
-								><input type="radio" name="attr-sides" value="" bind:group={f.leftOut} /> Three sides</label
-							>
+							<span class="text-mist-400">Two sides, left out:</span>
 							{#each FACTIONS as x (x)}
 								<label class="flex items-center gap-2"
-									><input type="radio" name="attr-sides" value={x} bind:group={f.leftOut} /> Two sides,
-									{x} left out</label
+									><input type="radio" name="attr-sides" value={x} bind:group={f.leftOut} />
+									{x}</label
 								>
 							{/each}
 						</div>
@@ -3267,11 +3265,10 @@
 							or the world count too (a suicide, a fall)</label
 						>
 						<p class="text-[12px] text-mist-600">
-							A life is lost to a kill by the other side; a team kill never counts. With two sides,
-							the faction left out is not counted and cannot win: close it with a Team balance rule,
-							so nobody plays on it. With three, the side with the fewest deaths of the others wins,
-							and a tie between them is a draw. Deaths by a player's own hand include the kills the
-							panel's own rules make to move or reset someone.
+							A life is lost to a kill by the other side; a team kill never counts. The war is fought
+							by two sides: the faction left out is not counted and cannot win, so close it with a
+							Team balance rule and nobody plays on it. Deaths by a player's own hand include the
+							kills the panel's own rules make to move or reset someone.
 						</p>
 					</fieldset>
 					<fieldset class="space-y-2">

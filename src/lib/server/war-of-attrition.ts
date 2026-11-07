@@ -2,10 +2,10 @@
 // match, and the first side to lose them all loses it. The game's own scoring still runs; the rule
 // counts each side's deaths from the kill feed, and as one side reaches the rule's limit the side
 // in play with the fewest deaths wins: the rule announces it and ends the match (POST
-// /v1/match/end, Match control). Meant for two sides: the rule can leave a faction out of the count
-// (closed with a Team balance rule), and with three in play the side with the fewest deaths of the
-// others wins (a tie between them is a draw). A time limit can end it sooner, the side with the
-// fewest deaths winning; a match the game ends first is told by its deaths as they stood.
+// /v1/match/end, Match control). It is fought by two sides: the rule names the faction it leaves out
+// of the count and the win (closed with a Team balance rule, so nobody plays on it). A time limit can
+// end it sooner, the side with the fewest deaths winning; a match the game ends first is told by its
+// deaths as they stood.
 //
 // A death is a player killed by the other side; one by their own hand or the world (a suicide, a
 // fall, a kill the panel's own rules make to move someone) counts only when the rule says so, and a
@@ -31,7 +31,7 @@ const MAX_MILESTONES = 10;
 export interface AttritionConfig {
 	/** the deaths that lose a side the match */
 	limit: number;
-	/** a faction left out of the count and the win (closed by a Team balance rule); '' for none */
+	/** the faction left out of the count and the win (closed by a Team balance rule): two sides */
 	leftOut: string;
 	/** deaths by a player's own hand or the world count too */
 	countSelfInflicted: boolean;
@@ -68,11 +68,15 @@ export function validateAttrition(c: Record<string, unknown>): AttritionConfig {
 			400,
 			`The deaths that lose a side go from ${ATTRITION_MIN_LIMIT} to ${ATTRITION_MAX_LIMIT}.`
 		);
+	// two sides only: the third faction is named, and left out
+	const leftOut = str(c.leftOut ?? '', 64).trim();
+	if (!leftOut)
+		throw new ApiError(400, 'Name the faction left out: the war is fought by two sides.');
 	const text = (k: keyof typeof WAR_OF_ATTRITION_DEFAULTS) =>
 		c[k] === undefined ? WAR_OF_ATTRITION_DEFAULTS[k] : str(c[k], 256);
 	return {
 		limit,
-		leftOut: c.leftOut === undefined ? '' : str(c.leftOut, 64),
+		leftOut,
 		countSelfInflicted: c.countSelfInflicted === true,
 		milestones: numbers(
 			c.milestones,

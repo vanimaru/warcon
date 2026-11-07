@@ -58,6 +58,7 @@ const SILENT_ECON = {
 /** A War of Attrition rule that says nothing: it needs only Match control, to end the match. */
 const SILENT_ATTRITION = {
 	limit: 50,
+	leftOut: 'Manticore',
 	startMessage: '',
 	milestoneMessage: '',
 	winMessage: '',
